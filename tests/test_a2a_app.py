@@ -14,7 +14,8 @@ from a2a.server.agent_execution import RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.types import Message, Role, SendMessageRequest, TaskState
 from google.protobuf.json_format import MessageToDict
-from ops_investigator import a2a_app, agent, agent_cache, platform, runtime_common
+from ops_investigator import a2a_app, agent, agent_cache, platform, runtime_common, tool_events
+from strands.hooks import AfterToolCallEvent
 
 CONTEXT = "c" * 36  # what the SDK generates: a uuid4, comfortably over AgentCore's 33-char floor
 VERSION_HEADERS = {"A2A-Version": "1.0"}
@@ -401,6 +402,35 @@ async def test_the_timeout_does_not_swallow_someone_elses_timeout(monkeypatch):
         task = await _send(client)
     assert _state(task) == "TASK_STATE_FAILED"
     assert "timeout after" not in _status_text(task)
+
+
+async def test_a_turn_drains_the_tool_result_recorder(monkeypatch):
+    """A2A publishes one text artifact, so there is no `tool_result` frame to emit here (P51) — but the
+    after-tool hook still fires, and its buffer would grow for the life of the cached agent."""
+
+    def finished(tool_use_id: str):
+        return AfterToolCallEvent(
+            agent=None,
+            selected_tool=None,
+            tool_use={"toolUseId": tool_use_id, "name": "aws_call"},
+            invocation_state={},
+            result={"toolUseId": tool_use_id, "status": "success", "content": [{"text": "x" * 4096}]},
+        )
+
+    class RecordingAgent(FakeAgent):
+        async def stream_async(self, prompt, **kw):
+            self.recorder._on_after_tool(finished("mid"))
+            yield {"data": "Findings: "}
+            yield {"result": _result()}
+            self.recorder._on_after_tool(finished("last"))  # the hook can fire after the last event
+
+    agent = RecordingAgent()
+    agent.recorder = tool_events.ToolResultRecorder()
+    tool_events.attach(agent, agent.recorder)
+    deadline = asyncio.get_running_loop().time() + 30
+    answer, stop_reason, timed_out = await a2a_app._collect(agent, "q", deadline, a2a_app.LIMITS)
+    assert (answer, stop_reason, timed_out) == ("Findings: ", "end_turn", False)
+    assert agent.recorder.drain() == []
 
 
 async def test_cancel_marks_the_task_canceled():

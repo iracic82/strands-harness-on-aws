@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 from bedrock_agentcore.runtime.models import PingStatus
-from ops_investigator import agent, http_app, platform
+from ops_investigator import agent, http_app, platform, tool_events
+from strands.hooks import AfterToolCallEvent
 
 SESSION = "s" * 33
 
@@ -136,6 +137,77 @@ async def test_invoke_uses_one_event_mapper_per_turn(monkeypatch):
     assert [f["type"] for f in frames] == ["tool_use", "tool_result", "metrics", "done"]
     assert frames[0]["input_keys"] == ["service"]
     assert frames[1]["name"] == "aws_call" and frames[1]["bytes"] == 1
+
+
+# --- tool_result frames come from the after-tool hook, not the stream: `ToolResultEvent` is not a
+# callback event in strands 1.56, so a real `stream_async` never yields one (P51). ---
+
+
+def _finished(tool_use_id: str = "t1", name: str = "aws_call", status: str = "success", text: str = "hello"):
+    return AfterToolCallEvent(
+        agent=None,
+        selected_tool=None,
+        tool_use={"toolUseId": tool_use_id, "name": name},
+        invocation_state={},
+        result={"toolUseId": tool_use_id, "status": status, "content": [{"text": text}]},
+    )
+
+
+FIRE = object()  # a marker in RecordingAgent's event list: "the tool finished here"
+
+
+class RecordingAgent(FakeAgent):
+    """Runs the hook mid-stream, where a real tool call would: after its `tool_use_stream` deltas."""
+
+    def __init__(self, events, finished, after_last_event=False):
+        super().__init__(events)
+        self._finished = finished
+        self._after_last_event = after_last_event
+        self.recorder = tool_events.ToolResultRecorder()
+        tool_events.attach(self, self.recorder)
+
+    async def stream_async(self, prompt, **kw):
+        assert kw["limits"] == http_app.LIMITS
+        for event in self._events:
+            if event is FIRE:
+                self.recorder._on_after_tool(self._finished)
+                continue
+            yield event
+        if self._after_last_event:
+            self.recorder._on_after_tool(self._finished)
+
+
+async def test_invoke_emits_a_tool_result_frame_from_the_after_tool_hook(monkeypatch):
+    tool_use = {"toolUseId": "t1", "name": "aws_call", "input": '{"service": "sts"}'}
+    events = [
+        {"type": "tool_use_stream", "current_tool_use": tool_use},
+        FIRE,
+        {"data": "account 123456789012"},
+        {"result": _result()},
+    ]
+    agent = RecordingAgent(events, _finished())
+    _use(monkeypatch, agent)
+    frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
+    # The result lands before the text that followed it, not at the end of the turn.
+    assert [f["type"] for f in frames] == ["tool_use", "tool_result", "text", "metrics", "done"]
+    assert frames[1] == {"v": 1, "type": "tool_result", "name": "aws_call", "status": "success", "bytes": 5}
+    assert agent.recorder.drain() == []  # the stream loop drained it; nothing accumulates on the agent
+
+
+async def test_invoke_emits_a_tool_result_recorded_after_the_last_stream_event(monkeypatch):
+    """The hook can fire after the stream is done, so the loop drains once more before metrics."""
+    agent = RecordingAgent([{"result": _result()}], _finished(status="error", text="DENIED"), after_last_event=True)
+    _use(monkeypatch, agent)
+    frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
+    assert [f["type"] for f in frames] == ["tool_result", "metrics", "done"]
+    assert frames[0]["status"] == "error" and frames[0]["name"] == "aws_call"
+
+
+async def test_invoke_works_for_an_agent_with_no_recorder(monkeypatch):
+    """`recorder_for` returns None for any agent not built by `build_agent` (P51)."""
+    _use(monkeypatch, FakeAgent([{"data": "hi"}, {"result": _result()}]))
+    frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
+    assert [f["type"] for f in frames] == ["text", "metrics", "done"]
 
 
 async def test_invoke_bad_payload_yields_error():

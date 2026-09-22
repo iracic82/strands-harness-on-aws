@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from ops_investigator import agent as mod
-from ops_investigator import platform
+from ops_investigator import platform, tool_events
 from ops_investigator.guard import ReadOnlyGuard
 from ops_investigator.prompts import LOCAL_TOOLS_NOTE, OPS_INSTRUCTIONS
 from strands.types.agent import Limits
@@ -76,6 +76,27 @@ def test_local_options():
     assert isinstance(platform.guard_for(rt), ReadOnlyGuard) and platform.guard_for(rt).denied_tools == frozenset()
 
 
+class _FakeHarnessAgent:
+    """Enough of an Agent for what `build_agent`/`build_reader` do to one: `_cap_stream` and `attach`."""
+
+    async def stream_async(self, prompt=None, **kw):
+        yield {"data": "ok"}
+
+
+def _capture(captured: dict):
+    """A `create_harness` stand-in that records its kwargs and returns an agent to attach to.
+
+    It has to return something: `build_agent`/`build_reader` attach the tool-result recorder to the
+    agent `create_harness` hands back (`tool_events.attach`).
+    """
+
+    def fake_create_harness(**kw):
+        captured.update(kw)
+        return _FakeHarnessAgent()
+
+    return fake_create_harness
+
+
 def test_build_agent_local_wires_tools_and_trace_attributes(monkeypatch):
     captured = {}
 
@@ -105,7 +126,7 @@ def test_build_agent_local_wires_tools_and_trace_attributes(monkeypatch):
 
 def test_build_agent_local_appends_the_local_tools_note(monkeypatch):
     captured = {}
-    monkeypatch.setattr(mod, "create_harness", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(mod, "create_harness", _capture(captured))
     mod.build_agent("s" * 33, "igor", env={})
     assert captured["instructions"] == OPS_INSTRUCTIONS + LOCAL_TOOLS_NOTE
     assert "no `write` or `edit`" in captured["instructions"]
@@ -115,7 +136,7 @@ def test_build_agent_cloud_instructions_omit_the_local_tools_note(cloud_env, mon
     monkeypatch.setattr(platform.tempfile, "gettempdir", lambda: str(tmp_path))
     _offline_session_manager(monkeypatch)
     captured = {}
-    monkeypatch.setattr(mod, "create_harness", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(mod, "create_harness", _capture(captured))
     mod.build_agent("s" * 33, "igor")
     assert captured["instructions"] == OPS_INSTRUCTIONS
     assert LOCAL_TOOLS_NOTE not in captured["instructions"]
@@ -190,6 +211,31 @@ def test_build_reader_without_a_runtime_fails_closed(monkeypatch):
     monkeypatch.setattr(mod, "_current", {})
     with pytest.raises(RuntimeError, match="requires a Runtime"):
         mod.build_reader(_reader_spec())
+
+
+def test_build_agent_wires_a_tool_result_recorder(monkeypatch):
+    """`stream_async` never yields a tool result (P51), so the recorder hook is the only source."""
+    captured = {}
+    monkeypatch.setattr(mod, "create_harness", _capture(captured))
+    built = mod.build_agent("s" * 33, "igor", env={})
+    recorder = tool_events.recorder_for(built)
+    assert isinstance(recorder, tool_events.ToolResultRecorder)
+    assert captured["hooks"] == [recorder]  # the same instance the runtime drains
+
+
+def test_build_reader_wires_its_own_recorder(monkeypatch):
+    """The reader's results are the reader's own: a separate recorder, never the parent's."""
+    parent_captured = {}
+    monkeypatch.setattr(mod, "create_harness", _capture(parent_captured))
+    parent = mod.build_agent("s" * 33, "igor", env={})
+    rt = platform.detect("s" * 33, "igor")
+    child_captured = {}
+    monkeypatch.setattr(mod, "create_harness", _capture(child_captured))
+    child = mod.build_reader(_reader_spec(), rt=rt)
+    child_recorder = tool_events.recorder_for(child)
+    assert isinstance(child_recorder, tool_events.ToolResultRecorder)
+    assert child_captured["hooks"] == [child_recorder]
+    assert child_recorder is not tool_events.recorder_for(parent)
 
 
 def test_reader_tool_is_named_reader_with_no_open_tools_param():

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from bedrock_agentcore.runtime.models import PingStatus
 
-from ops_investigator import platform, sse
+from ops_investigator import platform, sse, tool_events
 from ops_investigator.agent import LIMITS, build_agent
 from ops_investigator.agent_cache import CACHE, CACHE_SIZE, ActorMismatch, AgentCache
 from ops_investigator.auth import ActorError, actor_from_headers
@@ -74,17 +74,32 @@ def validate_payload(payload: Any) -> dict:
 app = BedrockAgentCoreApp()
 
 
+def _recorded(recorder: tool_events.ToolResultRecorder | None, mapper: sse.EventMapper) -> Iterator[dict]:
+    """Frames for the tool calls that finished since the last drain (P51)."""
+    for event in recorder.drain() if recorder else ():
+        frame = sse.map_event(event, mapper)
+        if frame:
+            yield frame
+
+
 async def _turn(agent: Any, prompt: str, limits: dict, results: list[Any]) -> AsyncIterator[dict]:
     """Yield one turn's SSE frames. An async generator cannot return a value, so the AgentResult
     (which arrives as the last stream event, not as a frame) lands in `results`."""
     mapper = sse.EventMapper()  # one per turn: dedupes tool_use frames and names tool_result frames
+    recorder = tool_events.recorder_for(agent)
     async for event in agent.stream_async(prompt, limits=limits):
+        # A finished tool call reaches us through the after-tool hook, never the stream (P51). Drain
+        # before this event is mapped, so its `tool_result` frame precedes whatever the model said next.
+        for frame in _recorded(recorder, mapper):
+            yield frame
         if isinstance(event, dict) and "result" in event:
             results.append(event["result"])
             continue
         frame = sse.map_event(event, mapper)
         if frame:
             yield frame
+    for frame in _recorded(recorder, mapper):  # a call that finished after the stream's last event
+        yield frame
 
 
 async def _stream(agent: Any, prompt: str, limits: dict, model: str) -> AsyncIterator[dict]:

@@ -17,6 +17,7 @@ from strands_harness.tools import AgentSpec, Fixed, Inherit, Preset, make_subage
 
 from ops_investigator import platform
 from ops_investigator.prompts import LOCAL_TOOLS_NOTE, OPS_INSTRUCTIONS, READER_PROMPT
+from ops_investigator.tool_events import ToolResultRecorder, attach
 from ops_investigator.tools import AWS_TOOLS
 
 LIMITS = Limits(turns=25, output_tokens=60_000, total_tokens=1_500_000)
@@ -50,6 +51,8 @@ def build_reader(spec: AgentSpec, rt: platform.Runtime | None = None) -> Agent:
     rt = rt or _current.get("rt")
     if rt is None:
         raise RuntimeError("build_reader requires a Runtime; call build_agent first")
+    # The reader's own recorder: its tool calls are its own, and only the parent's feed the parent's stream.
+    recorder = ToolResultRecorder()
     child = create_harness(
         model=spec.model or rt.model,
         effort="low",
@@ -60,11 +63,12 @@ def build_reader(spec: AgentSpec, rt: platform.Runtime | None = None) -> Agent:
         memory=False,
         skills=False,
         interventions=[platform.guard_for(rt)],
+        hooks=[recorder],
         context_manager="auto",
         name="reader",
         trace_attributes={"session.id": rt.session_id, "agent.role": "reader"},
     )
-    return _cap_stream(child, READER_LIMITS)
+    return _cap_stream(attach(child, recorder), READER_LIMITS)
 
 
 def make_reader_tool(rt: platform.Runtime) -> AgentTool:
@@ -90,7 +94,9 @@ def build_agent(session_id: str, actor_id: str, env: Mapping[str, str] | None = 
     rt = platform.detect(session_id, actor_id, env=env)
     _current["rt"] = rt
     platform.enter_workspace(rt)
-    return create_harness(
+    # The stream never carries a tool result (P51); the hook that does is attached below for the runtimes.
+    recorder = ToolResultRecorder()
+    agent = create_harness(
         model=rt.model,
         effort=rt.effort,
         instructions=OPS_INSTRUCTIONS if rt.profile == "cloud" else OPS_INSTRUCTIONS + LOCAL_TOOLS_NOTE,
@@ -102,6 +108,7 @@ def build_agent(session_id: str, actor_id: str, env: Mapping[str, str] | None = 
         memory=platform.memory_option(rt),
         skills=platform.skills_option(rt),
         interventions=[platform.guard_for(rt)],
+        hooks=[recorder],
         caching="auto",
         context_manager="auto",
         name="ops-investigator",
@@ -112,3 +119,4 @@ def build_agent(session_id: str, actor_id: str, env: Mapping[str, str] | None = 
             "harness.effort": rt.effort,
         },
     )
+    return attach(agent, recorder)

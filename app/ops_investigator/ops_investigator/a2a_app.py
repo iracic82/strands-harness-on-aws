@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from ops_investigator import tool_events
 from ops_investigator.agent import LIMITS, build_agent
 from ops_investigator.agent_cache import CACHE, ActorMismatch
 from ops_investigator.agent_card import build_agent_card
@@ -102,13 +103,23 @@ async def _text_chunks(agent: Any, prompt: str, limits: dict, results: list[Any]
     The AgentResult arrives as the last stream event rather than as a chunk, and an async generator
     cannot return a value, so it lands in `results` (the same shape `http_app._turn` uses).
     """
-    async for event in agent.stream_async(prompt, limits=limits):
-        if not isinstance(event, dict):
-            continue
-        if "result" in event:
-            results.append(event["result"])
-        elif isinstance(event.get("data"), str):
-            yield event["data"]
+    # A2A publishes one text artifact, so a finished tool call has no frame to land in here the way it
+    # does in `http_app._turn`. Drain the after-tool hook's buffer anyway (P51), on every event and once
+    # more when the turn ends, or it grows for the life of the cached agent.
+    recorder = tool_events.recorder_for(agent)
+    try:
+        async for event in agent.stream_async(prompt, limits=limits):
+            if recorder is not None:
+                recorder.drain()
+            if not isinstance(event, dict):
+                continue
+            if "result" in event:
+                results.append(event["result"])
+            elif isinstance(event.get("data"), str):
+                yield event["data"]
+    finally:
+        if recorder is not None:
+            recorder.drain()
 
 
 async def _collect(agent: Any, prompt: str, deadline: float, limits: dict) -> tuple[str, str, bool]:

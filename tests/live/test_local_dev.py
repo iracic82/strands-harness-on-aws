@@ -95,24 +95,27 @@ def test_three_prompts_and_local_state(server):
     assert _types(identity)[-1] == "done", _types(identity)
     assert "error" not in _types(identity)[:-1], identity
     assert any(frame.get("name") == "aws_call" for frame in identity if frame.get("type") == "tool_use"), identity
+    # `stream_async` never yields a tool result (P51): every `tool_result` frame here was sourced from the
+    # after-tool hook, and it has to land after the `tool_use` frame for the same call.
+    succeeded = [frame for frame in identity if frame.get("type") == "tool_result" and frame.get("name") == "aws_call"]
+    assert succeeded and all(frame.get("status") == "success" for frame in succeeded), identity
+    assert _types(identity).index("tool_use") < _types(identity).index("tool_result"), _types(identity)
 
     mutate = _turn(
         server, "Try to run aws_call ec2 terminate_instances with InstanceIds ['i-0']. Report what happened."
     )
     assert _types(mutate)[-1] == "done", _types(mutate)
     # `ReadOnlyGuard` denies in `before_tool_call`, so the tool never runs. The SDK's `tool_cancel_event`
-    # for the denial reaches the wire as a `denied` frame (EventMapper._map_tool_cancel); the harness
-    # still emits an error `tool_result` for the same toolUseId, but no successful one.
+    # for the denial reaches the wire as a `denied` frame (EventMapper._map_tool_cancel), and the error
+    # `ToolResult` the executor synthesises for the same call reaches it through the after-tool hook.
     attempted = [frame for frame in mutate if frame.get("type") == "tool_use" and frame.get("name") == "aws_call"]
     denied = [frame for frame in mutate if frame.get("type") == "denied"]
-    ran = [
-        frame
-        for frame in mutate
-        if frame.get("type") == "tool_result" and frame.get("name") == "aws_call" and frame.get("status") != "error"
-    ]
+    results = [frame for frame in mutate if frame.get("type") == "tool_result" and frame.get("name") == "aws_call"]
+    ran = [frame for frame in results if frame.get("status") != "error"]
     assert attempted and not ran, mutate
     assert denied and denied[0].get("tool") == "aws_call", mutate
     assert "read-only" in denied[0].get("reason", "").lower(), mutate
+    assert results and results[0].get("status") == "error", mutate
     said = _text(mutate).lower()
     assert any(marker in said for marker in ("denied", "not a permitted", "blocked", "read-only")), mutate
 

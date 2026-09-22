@@ -108,6 +108,9 @@ class EventMapper:
         return frame("denied", tool=str(name), reason=reason[:300])
 
     def _map_tool_result(self, event: dict) -> dict | None:
+        """The SDK does not stream tool results, so these come from the after-tool hook
+        (`tool_events.ToolResultRecorder`, P51), which supplies the name the id map would otherwise
+        have to. The id-map fallback stays for a result recorded without one."""
         tr = event.get("tool_result")
         tr = tr if isinstance(tr, dict) else {}
         tool_use_id = tr.get("toolUseId", "")
