@@ -6,6 +6,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _restore_cwd():
+    cwd = os.getcwd()
+    yield
+    os.chdir(cwd)
+
+
+@pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for k in (
         "MEMORY_OPSINVESTIGATORMEMORY_ID",
