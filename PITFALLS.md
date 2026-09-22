@@ -133,6 +133,8 @@ set on both runtimes in `agentcore/agentcore.json`; the `reader` subagent is pin
 
 **Symptom.** Every control-plane call in your favourite region fails, and the error does not say "not
 enabled here".
+**Cause.** AgentCore Runtime is enabled per account per region, and the control plane returns a generic
+error rather than "not enabled here".
 **Fix.** Probe the control plane in the region you chose, before you build anything.
 **Where in this repo.** `doctor.py:_agentcore_region_check` calls `list_agent_runtimes(maxResults=1)` and
 FAILs with "pick a supported region".
@@ -373,6 +375,8 @@ annotations so an upstream rename fails loudly.
 
 **Symptom.** `create_harness(...)` raises at construction because you listed a tool that does not exist for
 this provider. Or, worse, the Exa fallback engages and your queries go to a third party.
+**Cause.** `web_search` is provider-specific and Bedrock does not offer it, so `create_harness` raises when
+it is named, and the harness's Exa fallback is a third-party egress path.
 **Fix.** Pin it off explicitly rather than leaving it to the default.
 **Where in this repo.** `platform.builtin_tools` sets `"web_search": False` in local and `"*": False` in
 cloud. Pinned by `tests/test_agent.py::test_local_builtin_tools_drop_subagent_web_search_write_edit`.

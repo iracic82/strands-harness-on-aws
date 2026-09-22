@@ -126,11 +126,15 @@ their values. A prompt-injected argument cannot leak through telemetry it never 
 tool's name. The name is resolved from the mapper's `toolUseId` map, because the underlying event does not
 carry one (P35).
 
-**There is no `denied` frame.** A `ReadOnlyGuard` refusal reaches the caller as a `tool_result` with
-`status=error`, plus the model's own explanation in the text stream. The guard's structured
-`guard.denied tool=... reason=...` line goes to the runtime log, which is where you look for it.
-`scripts/invoke.py` renders a `denied` frame if one ever appears, so a future change costs nothing on the
-client side.
+**There is no `denied` frame.** A `ReadOnlyGuard` refusal produces a `tool_use` frame, then a `tool_result`
+frame with `status=error`, plus the model's own explanation in the text stream. On the wire that is
+indistinguishable from a tool that failed for any other reason: the reason text (`DENIED: read-only: ...`)
+is in the tool result's content, and the frame reports content only as a byte count. Look for the guard's
+structured `guard.denied tool=... reason=...` line in the runtime log instead.
+
+Strands does emit a third event in between, `tool_cancel_event`, which carries the denial message, and
+`sse.EventMapper` drops it because it matches none of the mapped types. That event is where a `denied`
+frame would come from, and `scripts/invoke.py` already renders one if it ever appears.
 
 **`est_usd` can be `null`.** `sse.estimate_usd` matches the model id against a small price table of
 `sonnet`, `opus`, and `haiku`. A model outside those families logs a warning and reports `null` rather

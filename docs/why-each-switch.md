@@ -15,7 +15,7 @@ flowchart TD
     q -->|"yes"| region{"AWS_REGION or<br/>AWS_DEFAULT_REGION set?"}
     region -->|"no"| boom["RuntimeConfigError<br/>with the fix text"]
     region -->|"yes"| cloud["profile = cloud"]
-    local --> lopt["session: ./.agent/sessions<br/>memory: ./.agent/memory + Haiku<br/>workspace: the source tree<br/>tools: shell, read, web_fetch<br/>guard: aws_call and shell only"]
+    local --> lopt["session: ./.agent/sessions<br/>memory: ./.agent/memory + Haiku<br/>workspace: the source tree<br/>tools: harness defaults minus subagent, web_search, write, edit<br/>guard: aws_call and shell only"]
     cloud --> copt["session: AgentCoreMemorySessionManager<br/>memory: AgentCore stores, no extractor<br/>workspace: $TMPDIR/ops-workspace<br/>tools: read + programmatic_tool_caller<br/>guard: everything dangerous denied"]
     lopt --> harness(["create_harness(...)"])
     copt --> harness

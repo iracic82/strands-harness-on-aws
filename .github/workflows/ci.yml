@@ -27,6 +27,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install "3.12"
       - run: uv sync --frozen --python "3.12"
+      # Every relative link, image, and heading anchor in the repo's markdown has to resolve.
+      - run: uv run python scripts/check_links.py
       # TODO(Task 16): scripts/verify_docs.py does not exist yet. Uncomment once it lands.
       # - run: uv run python scripts/verify_docs.py
 

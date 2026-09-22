@@ -26,17 +26,17 @@ git clone https://github.com/iracic82/strands-harness-on-aws.git
 cd strands-harness-on-aws
 uv sync
 export AWS_PROFILE=<your-profile>      # naming the profile explicitly is not optional, see PITFALLS P30
-export AWS_REGION=us-west-2            # optional; every target defaults to us-west-2
+export AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2   # both, see PITFALLS P28
 ```
 
 ```bash
-make setup     # writes agentcore/aws-targets.json for your account
+cp agentcore/aws-targets.example.json agentcore/aws-targets.json   # put your own account id in it
 make doctor    # 14 checks; every FAIL prints the fix
 ```
 
-`make setup` will do the account detection for you. Until it lands it prints the one manual step instead:
-copy `agentcore/aws-targets.example.json` to `agentcore/aws-targets.json` and put your own account id in
-it. That file is git-ignored on purpose.
+`agentcore/aws-targets.json` is git-ignored, because it carries your account id. `make setup`, a follow-up
+task, will detect the account and region and write that file for you; today it prints the copy above and
+exits non-zero, so nobody mistakes it for having run.
 
 `make doctor` is the whole point of the repo in one command. It checks your Python, uv, Node, and CLI, then
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,
@@ -77,6 +77,11 @@ question in the same conversation, reuse the session id that the first invoke pr
 ```bash title="manual"
 uv run python scripts/invoke.py --dev --session <the printed id> --prompt "And how many of those are idle?"
 ```
+
+The local profile is not the cloud profile. It runs under your own AWS credentials, so the IAM deny layer
+is whatever your profile allows, and it keeps `shell` (vetted by the guard) and `web_fetch` (not vetted) so
+you can explore. Only the deployed runtime has all three layers. See
+[`docs/why-each-switch.md`](docs/why-each-switch.md).
 
 ## Deploy it
 
@@ -145,7 +150,7 @@ Four prompts worth showing live, and what each one proves:
 | "Which account and region are you in? Use `aws_call sts get_caller_identity`." | The tool loop, and that the agent cites account and region before anything else | The `tool_use` and `tool_result` frames in the terminal |
 | "Delete the oldest S3 bucket." | Read-only enforcement. The guard denies before the call is made | `guard.denied tool=aws_call reason=...` in `make logs`, next to the model explaining its refusal |
 | "Read the value of the `/prod/db/password` SSM parameter." | That "read-only" is not enough. `ssm:GetParameter` is a read by name and returns a secret, so it is in the deny table at all three layers | The `tool_result` frame with `status=error`, and the same `guard.denied` line. The call never reaches AWS, which is the point |
-| "What did I say my top cost concern was?" (session B) | Long-term memory across sessions, namespaced by the JWT `sub` | The answer itself, then `scripts/memory_wipe.py --dry-run` to list the records it came from |
+| "What did I say my top cost concern was?" (session B) | Long-term memory across sessions, namespaced by the JWT `sub` | The answer itself; `make memory-wipe MEMORY_ID=... ACTOR=...` forgets it again |
 
 The full trace walkthrough is [`docs/reading-the-traces.md`](docs/reading-the-traces.md).
 
@@ -238,13 +243,15 @@ A turn is one question and the tool calls the agent makes to answer it.
 |---|---|
 | Typical turn | ≈ $1 |
 | Full demo (two sessions plus an A2A card fetch) | ≈ $5 |
-| Hard cap per turn, enforced by `Limits` | ≈ $8 |
+| Worst case for one agent invocation, from `Limits` | ≈ $8 |
 
 These are estimates against the Bedrock price list and have not been reconciled against a real invoice.
-The cap is not a billing alarm; it is arithmetic on `Limits(turns=25, output_tokens=60_000,
-total_tokens=1_500_000)` in `agent.py`, which the runtime enforces per invocation and reports in the
-`metrics` frame as `est_usd`. The `reader` subagent has its own, smaller cap. Cost Explorer calls bill
-about a cent each, which is why that tool has a budget of 10 per turn.
+The ≈ $8 figure is arithmetic on `Limits(turns=25, output_tokens=60_000, total_tokens=1_500_000)` in
+`agent.py`, which the runtime enforces per invocation and reports in the `metrics` frame as `est_usd`.
+
+The `reader` subagent's cap is **per delegation, not per turn**: the parent can delegate repeatedly, and a
+delegate's budget is not counted against the parent's. So ≈ $8 is not a ceiling on what one turn can
+spend. Cost Explorer calls bill about a cent each, which is why that tool has a budget of 10 per turn.
 
 To spend less: set `HARNESS_EFFORT=low`, which cuts the thinking budget, or point `HARNESS_MODEL` at
 Haiku. To spend more and think harder, `HARNESS_EFFORT=high`. Both are env vars on the runtime in
@@ -252,7 +259,8 @@ Haiku. To spend more and think harder, `HARNESS_EFFORT=high`. Both are env vars 
 constant in `agent.py`; lowering the cap is a code change on purpose, because it is the last line of
 defence.
 
-Set your own billing alarm. Nothing in this repo can stop a loop that a human keeps re-prompting.
+Set your own billing alarm. Between repeated delegation and a human who keeps re-prompting, nothing in
+this repo is a spend ceiling.
 
 ## Security posture
 
@@ -260,7 +268,8 @@ The agent cannot write to AWS, and that is checked three times independently.
 
 1. **The tool.** `aws_call` accepts only `describe_/list_/get_/lookup_/search_/query_` operations, minus a
    deny table of reads that return secrets: SSM parameters, S3 object bodies, DynamoDB items, Lambda
-   config, EC2 user data, CloudFormation templates, the agent's own log groups. Output is capped at 40k
+   config, EC2 user data, CloudFormation templates, and every CloudWatch Logs read (use `logs_insights`,
+   which has its own prefix allowlist and refuses the agent's own groups). Output is capped at 40k
    characters and each turn gets 40 calls.
 2. **The intervention.** `ReadOnlyGuard` runs before every tool call and returns `Deny`, never `Confirm`.
    A `Confirm` would pause the turn waiting for a human who is not there (PITFALLS P10).
@@ -285,15 +294,18 @@ Full detail in [`PITFALLS.md`](PITFALLS.md) and [`docs/architecture.md`](docs/ar
 ## Clean up
 
 ```bash title="manual"
-make destroy                                                    # removes both runtimes and the memory
-aws cognito-idp delete-user-pool --user-pool-id <pool id>        # auth_bootstrap does not delete it
-make memory-wipe MEMORY_ID="$MEMORY_ID" ACTOR="$ACTOR"           # one actor's records, before destroy
+make memory-wipe MEMORY_ID="$MEMORY_ID" ACTOR="$ACTOR"     # one actor's records, while the memory exists
+make destroy                                               # removes both runtimes and the memory
+aws cognito-idp delete-user-pool --user-pool-id <pool id>  # auth_bootstrap does not delete it
 ```
 
+`make memory-wipe` comes first because it needs the memory to still be there. Both variables are required;
+to see what would go without deleting it, call the script directly with `--dry-run`.
+
 `make destroy` runs `agentcore remove all -y` followed by `agentcore deploy -y`, which leaves the project
-registered with none of its resources standing. Deleting the memory deletes its records with it, so
-`make memory-wipe` is for the case where you
-want to forget one person and keep the deployment. The ECR repository and the CDK bootstrap stack outlive
+registered with none of its resources standing. Destroying the memory takes its records with it, so the
+wipe target is really for the other case: forgetting one person and keeping the deployment. The ECR
+repository and the CDK bootstrap stack outlive
 all of this; remove them by hand if you are done with the account.
 
 ## Screenshots
@@ -314,6 +326,24 @@ Read in this order:
 5. [`docs/from-agentlab-to-this.md`](docs/from-agentlab-to-this.md) - if you did the lab.
 6. [`PITFALLS.md`](PITFALLS.md) - 50 numbered traps, each with symptom, cause, fix, and the file that
    handles it.
+
+## Configuration
+
+Every knob is an environment variable. On the deployed runtimes they live in `envVars` in
+`agentcore/agentcore.json`, so changing one needs a `make deploy` but not a rebuild. Locally, export them.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `HARNESS_MODEL` | `bedrock/global.anthropic.claude-sonnet-4-6` | The model, as a `provider/name` string. Never build a `BedrockModel` yourself (PITFALLS P11) |
+| `HARNESS_EFFORT` | `medium` | Thinking budget. One of `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. An unknown value fails at startup with the list |
+| `HARNESS_MAX_SECONDS` | `600` | Wall clock for one turn. A value that is not a number logs an error and falls back rather than stopping the container |
+| `OPS_LOG_GROUP_PREFIXES` | `/aws/lambda/,/aws/ecs/,/aws/apigateway/,/aws/eks/` | Comma-separated prefixes `logs_insights` may query. The agent's own groups, `/aws/bedrock-agentcore/` and `aws/spans`, are refused regardless of what you set here |
+| `ENABLE_AWS_DOCS_MCP` | unset | Set to `1` to attach the AWS documentation MCP server over streamable HTTP, with `continue_on_error` (PITFALLS P13) |
+| `MEMORY_OPSINVESTIGATORMEMORY_ID` | injected by CDK | **The profile switch.** Set means cloud, unset means local. You do not set this by hand |
+| `AWS_REGION` and `AWS_DEFAULT_REGION` | `us-west-2` | Always set both. botocore reads only the second one (PITFALLS P28) |
+| `A2A_PUBLIC_URL` | placeholder | The A2A runtime's own invocation URL, which the agent card advertises. Written back after the first deploy |
+| `COGNITO_DISCOVERY_URL` | placeholder | The OIDC discovery document the A2A card names in its security scheme. Written by `auth_bootstrap` |
+| `OTEL_TRACES_EXPORTER` | unset, keep it that way | Setting it makes the harness fight ADOT for the exporter and you lose your traces (PITFALLS P8) |
 
 ## Tested versions
 
