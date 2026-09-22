@@ -17,8 +17,10 @@ cd "$(dirname "$0")/.."
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 AGENTCORE="npx -y @aws/agentcore@0.30.0"
 
-# doctor exits 1 on any WARN and 2 on any FAIL; only a FAIL is worth stopping a paid smoke for.
-make doctor && DOCTOR=0 || DOCTOR=$?
+# doctor exits 1 on any WARN and 2 on any FAIL; only a FAIL is worth stopping a paid smoke for. Run it
+# directly, not through `make doctor`: make collapses every recipe failure to its own exit 2, so a WARN
+# would look exactly like a FAIL here.
+uv run python doctor.py --region "$REGION" && DOCTOR=0 || DOCTOR=$?
 [ "$DOCTOR" -ge 2 ] && { echo "doctor reported a FAIL; fix it before spending money here"; exit "$DOCTOR"; }
 
 make auth-bootstrap
@@ -148,4 +150,8 @@ else:
 PY
 
 echo "== done. Teardown with: make destroy   (left up for the demo by default)"
-echo "== before committing: uv run python scripts/auth_bootstrap.py --reset-placeholders"
+# This run wrote a real discovery URL, a real client id and a real A2A_PUBLIC_URL (which carries the
+# account id) into agentcore/agentcore.json. --reset-placeholders puts all three back, but git is the
+# one-step undo that also drops the reformatting.
+echo "== before committing: git checkout agentcore/agentcore.json"
+echo "   (or, to keep other edits: uv run python scripts/auth_bootstrap.py --reset-placeholders)"

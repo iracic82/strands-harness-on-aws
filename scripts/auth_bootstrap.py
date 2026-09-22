@@ -10,9 +10,10 @@ The config is edited structurally (load, mutate, `json.dump(indent=2)`) rather t
 the committed placeholders have to stay schema-valid for CDK -- `discoveryUrl` is a real https URL ending
 in the OIDC well-known path that merely *contains* the token -- so there is no bare token to regex for.
 
-`--reset-placeholders` puts the placeholders back: a real user pool id or app client id must never be
-committed (the repo-hygiene gate rejects it). It restores the values, not the AgentCore CLI's original
-whitespace; `git checkout agentcore/agentcore.json` drops both in one step.
+`--reset-placeholders` puts the placeholders back -- the discovery URL, the allowed client, and the
+`A2A_PUBLIC_URL` that `smoke.sh` fills in after the first deploy, which carries the account id. None of
+those may ever be committed (the repo-hygiene gate rejects them). It restores the values, not the
+AgentCore CLI's original whitespace; `git checkout agentcore/agentcore.json` drops both in one step.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ CONFIG = ROOT / "agentcore" / "agentcore.json"
 PLACEHOLDER = "REPLACED_BY_auth_bootstrap"
 PLACEHOLDER_REGION = "us-west-2"  # only ever part of the placeholder URL; the real one comes from --region
 DISCOVERY_ENV = "COGNITO_DISCOVERY_URL"  # the A2A container reads this to advertise the card's security scheme
+# smoke.sh writes the deployed A2A endpoint here, and that URL contains the account id. This script does
+# not set it, but --reset-placeholders has to clear it: it is the only "put the file back" command there is.
+PUBLIC_URL_ENV = "A2A_PUBLIC_URL"
+PUBLIC_URL_PLACEHOLDER = "REPLACED_AFTER_FIRST_DEPLOY"
 
 
 def discovery_url(region: str, pool_id: str) -> str:
@@ -116,6 +121,18 @@ def apply_auth(config: dict, *, discovery: str, client_id: str, env_discovery: s
     return changed
 
 
+def set_env_var(config: dict, name: str, value: str) -> list[str]:
+    """Set one env var wherever a runtime already declares it. Returns the runtimes it changed."""
+    changed: list[str] = []
+    for runtime in config.get("runtimes", []):
+        for var in runtime.get("envVars", []):
+            if var.get("name") == name:
+                var["value"] = value
+                changed.append(str(runtime.get("name", "")))
+                break
+    return changed
+
+
 def load_config(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -125,10 +142,13 @@ def write_config(path: Path, config: dict) -> None:
 
 
 def reset_placeholders(path: Path) -> list[str]:
+    """Put every deployment-time value back to its committed placeholder: the discovery URL, the allowed
+    client, and the A2A public URL that `smoke.sh` fills in after the first deploy."""
     config = load_config(path)
     changed = apply_auth(
         config, discovery=placeholder_discovery_url(), client_id=PLACEHOLDER, env_discovery=PLACEHOLDER
     )
+    changed += [name for name in set_env_var(config, PUBLIC_URL_ENV, PUBLIC_URL_PLACEHOLDER) if name not in changed]
     write_config(path, config)
     return changed
 

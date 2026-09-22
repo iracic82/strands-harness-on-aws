@@ -27,16 +27,23 @@ import base64
 import json
 import sys
 
-payload = sys.argv[1].split(".")[1]
-print(json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["sub"])
+try:
+    payload = sys.argv[1].split(".")[1]
+    print(json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["sub"])
+except (IndexError, KeyError, ValueError) as e:
+    raise SystemExit(f"get_token.py did not return a JWT ({type(e).__name__}); check DEMO_PASSWORD/CLIENT_ID")
 PY
 )
 echo "== actor $ACTOR (the JWT sub; memory is namespaced by it)"
 
 echo "== Session A"
+# Session A's stderr goes to a file only so the session id can be read back; it is echoed either way,
+# because a transport or auth failure says everything it has to say there.
 uv run python scripts/invoke.py --transport "$TRANSPORT" --arn "$ARN" --region "$REGION" --token "$TOKEN" \
   --prompt "Remember this preference: I own the prod account in $REGION and NAT Gateway cost is my top concern. Then tell me which AgentCore runtimes exist here." \
-  2>"$STDERR"
+  2>"$STDERR" && STATUS=0 || STATUS=$?
+cat "$STDERR" >&2
+[ "$STATUS" -eq 0 ] || { echo "== session A failed (exit $STATUS); stderr is above" >&2; exit "$STATUS"; }
 SESSION_A=$(sed -n 's/^session_id=//p' "$STDERR")
 echo "== session A was $SESSION_A"
 

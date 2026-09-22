@@ -26,7 +26,7 @@ from a2a.client import ClientConfig, create_client
 from a2a.helpers import new_text_message
 from a2a.types import AgentCard, Role, SendMessageRequest
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
-from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
 PROTOCOL_VERSION = "1.0"
 TIMEOUT = 900.0  # the server's own wall clock is 600s and it reports a timeout as a task state
@@ -96,7 +96,11 @@ async def send(http: httpx.AsyncClient, card: dict, prompt: str, context_id: str
     The client is built from the card we already fetched rather than from a URL, so the SDK does not
     resolve the card a second time (and does not have to guess where it lives).
     """
-    agent = ParseDict(card, AgentCard(), ignore_unknown_fields=True)
+    try:
+        agent = ParseDict(card, AgentCard(), ignore_unknown_fields=True)
+    except ParseError as e:
+        print(f"card is not 1.0-shaped, so this client cannot talk to it; see PITFALLS P22 ({e})")
+        return 1
     client = await create_client(agent, ClientConfig(streaming=False, httpx_client=http))
     try:
         message = new_text_message(prompt, role=Role.ROLE_USER)

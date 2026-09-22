@@ -9,6 +9,7 @@ guard refuses a mutating call instead of making it, and the harness leaves its s
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import socket
@@ -55,11 +56,10 @@ def server():
         for _ in range(90):
             if process.poll() is not None:
                 pytest.fail(f"dev server exited with {process.returncode} before serving")
-            try:
+            with contextlib.suppress(httpx.HTTPError):
                 if httpx.get(f"{BASE}/ping", timeout=1).status_code == 200:
                     break
-            except httpx.HTTPError:
-                time.sleep(1)
+            time.sleep(1)  # outside the suppress: a non-200 answer must back off too, not spin
         else:
             pytest.fail(f"{BASE}/ping never answered")
         yield BASE

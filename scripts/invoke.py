@@ -224,7 +224,7 @@ def open_stream(args: argparse.Namespace, session: str) -> Iterator[Iterable[str
         yield lines
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--arn", default=None, help="agent runtime ARN (not needed with --dev)")
     parser.add_argument("--region", default=None)
@@ -236,7 +236,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", default=DEV_URL, help=f"dev server base URL (default {DEV_URL})")
     parser.add_argument("--actor", default="local-dev", help=f"{ACTOR_HEADER} for --dev; ignored in the cloud")
     parser.add_argument("--raw", action="store_true", help="print each frame as the JSON it arrived as")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
+    if args.dev and args.token:
+        # Not an error: the dev server ignores Authorization entirely and takes the actor from a header,
+        # so a token here silently does nothing rather than authenticating anyone.
+        print("warning: --token is ignored with --dev; the dev server reads the actor from X-Actor-Id", file=sys.stderr)
     if not args.dev:
         if not args.arn:
             parser.error("--arn is required (or use --dev)")

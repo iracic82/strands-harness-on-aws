@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import shutil
@@ -10,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import botocore
 import pytest
 from botocore.awsrequest import AWSRequest
 from ops_investigator.runtime_common import MIN_SESSION_LEN
@@ -69,12 +71,16 @@ def test_apply_auth_rewrites_every_jwt_runtime_and_env_var(config_copy):
     assert env["A2A_PUBLIC_URL"] == "REPLACED_AFTER_FIRST_DEPLOY"  # a different script's placeholder, untouched
 
 
-def test_reset_placeholders_restores_the_committed_values(config_copy):
+def test_reset_placeholders_restores_every_deployment_time_value(config_copy):
+    """Including A2A_PUBLIC_URL, which `apply_auth` never touches but `smoke.sh` fills in with a URL
+    containing the account id. The reset is the one "put the file back" command, so it has to cover it."""
     pristine = json.loads(config_copy.read_text())
     config = auth_bootstrap.load_config(config_copy)
     auth_bootstrap.apply_auth(
         config, discovery=auth_bootstrap.discovery_url("us-west-2", "us-west-2_Real"), client_id="real"
     )
+    deployed_url = "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3A.../invocations"
+    assert auth_bootstrap.set_env_var(config, auth_bootstrap.PUBLIC_URL_ENV, deployed_url) == ["OpsInvestigatorA2A"]
     auth_bootstrap.write_config(config_copy, config)
     assert json.loads(config_copy.read_text()) != pristine
 
@@ -177,7 +183,49 @@ def test_print_frames_stops_at_done():
 def test_boto3_is_unsigned_only_when_a_bearer_token_is_in_play():
     """SigV4 deletes any Authorization header before it signs, so the two cannot be combined."""
     assert invoke.boto3_config(None) is None
-    assert invoke.boto3_config("jwt").signature_version is not None
+    assert invoke.boto3_config("jwt").signature_version is botocore.UNSIGNED
+
+
+def _recorded_stream(monkeypatch) -> list[tuple[str, dict, bytes]]:
+    """Replace the HTTP transport so open_stream can be inspected without a socket."""
+    calls: list[tuple[str, dict, bytes]] = []
+
+    @contextlib.contextmanager
+    def fake(url: str, headers: dict, body: bytes):
+        calls.append((url, headers, body))
+        yield []
+
+    monkeypatch.setattr(invoke, "_http_stream", fake)
+    return calls
+
+
+def test_open_stream_builds_the_dev_request(monkeypatch):
+    calls = _recorded_stream(monkeypatch)
+    args = invoke.build_parser().parse_args(["--dev", "--prompt", "hi", "--actor", "me"])
+    with invoke.open_stream(args, "s" * 40):
+        pass
+    url, headers, body = calls[0]
+    assert url == "http://localhost:8080/invocations"
+    assert headers == {invoke.SESSION_HEADER: "s" * 40, invoke.ACTOR_HEADER: "me", "Content-Type": "application/json"}
+    assert json.loads(body) == {"prompt": "hi"}
+
+
+def test_open_stream_builds_the_https_request(monkeypatch):
+    calls = _recorded_stream(monkeypatch)
+    args = invoke.build_parser().parse_args(
+        ["--transport", "https", "--arn", "arn:aws:x", "--region", "us-west-2", "--token", "jwt", "--prompt", "hi"]
+    )
+    with invoke.open_stream(args, "s" * 40):
+        pass
+    url, headers, body = calls[0]
+    assert url == invoke.invocations_url("arn:aws:x", "us-west-2")
+    assert headers == {
+        "Authorization": "Bearer jwt",
+        invoke.SESSION_HEADER: "s" * 40,
+        "Content-Type": "application/json",
+    }
+    assert invoke.ACTOR_HEADER not in headers  # in the cloud the actor comes from the token's `sub`
+    assert json.loads(body) == {"prompt": "hi"}
 
 
 def test_the_bearer_token_survives_on_the_boto3_transport():
