@@ -20,6 +20,7 @@
       "networkMode": "PUBLIC",
       "protocol": "HTTP",
       "envVars": [
+        { "name": "AWS_REGION", "value": "us-west-2" },
         { "name": "HARNESS_MODEL", "value": "bedrock/global.anthropic.claude-sonnet-4-6" },
         { "name": "HARNESS_EFFORT", "value": "medium" },
         { "name": "HARNESS_MAX_SECONDS", "value": "600" },
@@ -46,9 +47,11 @@
       "networkMode": "PUBLIC",
       "protocol": "A2A",
       "envVars": [
+        { "name": "AWS_REGION", "value": "us-west-2" },
         { "name": "HARNESS_MODEL", "value": "bedrock/global.anthropic.claude-sonnet-4-6" },
         { "name": "HARNESS_EFFORT", "value": "medium" },
         { "name": "HARNESS_MAX_SECONDS", "value": "600" },
+        { "name": "OPS_LOG_GROUP_PREFIXES", "value": "/aws/lambda/,/aws/ecs/,/aws/apigateway/,/aws/eks/" },
         { "name": "A2A_PUBLIC_URL", "value": "REPLACED_AFTER_FIRST_DEPLOY" },
         { "name": "COGNITO_DISCOVERY_URL", "value": "REPLACED_BY_auth_bootstrap" }
       ],

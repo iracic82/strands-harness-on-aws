@@ -22,13 +22,14 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # The whole app dir, not just the package: the wheel only packages ops_investigator/, but AGENTS.md
 # and skills/ have to be on disk at runtime for the harness to load them.
-COPY --chown=bedrock_agentcore:bedrock_agentcore . .
+COPY . .
 RUN uv sync --frozen --no-dev
 
-# WORKDIR created /app as root and --chown only touches the copied entries, not the directory
-# itself. The local profile serves from /app and writes session snapshots to /app/.agent, so the
-# runtime user needs to own the directory or every turn dies with PermissionError.
-RUN chown bedrock_agentcore:bedrock_agentcore /app
+# /app and .venv stay root-owned, so the runtime user cannot rewrite its own code or dependencies
+# (P2). The one exception: the local profile serves from /app and writes harness session snapshots
+# under /app/.agent, so pre-create just that directory and hand it to the runtime user. The cloud
+# profile never touches it, because there the workspace is a tempdir.
+RUN mkdir -p /app/.agent && chown bedrock_agentcore:bedrock_agentcore /app/.agent
 
 USER bedrock_agentcore
 

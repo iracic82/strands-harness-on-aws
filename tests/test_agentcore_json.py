@@ -29,12 +29,13 @@ def _load(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def _statement_actions(statement: dict) -> set[str]:
+    raw = statement["Action"]
+    return {a.lower() for a in (raw if isinstance(raw, list) else [raw])}
+
+
 def _iam_actions(doc: dict) -> set[str]:
-    actions: set[str] = set()
-    for statement in doc["Statement"]:
-        raw = statement["Action"]
-        actions.update(a.lower() for a in (raw if isinstance(raw, list) else [raw]))
-    return actions
+    return {action for statement in doc["Statement"] for action in _statement_actions(statement)}
 
 
 def _covered(actions: set[str], service: str, operation: str) -> bool:
@@ -42,7 +43,9 @@ def _covered(actions: set[str], service: str, operation: str) -> bool:
     if action is None:
         action = f"{service}:" + "".join(part.capitalize() for part in operation.split("_"))
     action = action.lower()
-    return any(a == action or (a.endswith("*") and action.startswith(a[:-1])) for a in actions)
+    # A bare "*" would match every operation and make this whole test vacuous, so it never counts
+    # as coverage. Only a prefixed wildcard such as "s3:GetObject*" does.
+    return any(a.strip("*") != "" and (a == action or (a.endswith("*") and action.startswith(a[:-1]))) for a in actions)
 
 
 def test_agentcore_json_shape():
@@ -75,9 +78,13 @@ def test_runtimes_declare_the_model_and_budget_the_harness_reads():
     cfg = _load(ROOT / "agentcore" / "agentcore.json")
     for runtime in cfg["runtimes"]:
         env = {e["name"]: e["value"] for e in runtime["envVars"]}
-        assert env["HARNESS_MODEL"] == "bedrock/global.anthropic.claude-sonnet-4-6"
-        assert env["HARNESS_EFFORT"] == "medium"
-        assert env["HARNESS_MAX_SECONDS"] == "600"
+        # platform.detect raises RuntimeConfigError in the cloud profile without a region, so every
+        # runtime has to carry one. setup.py rewrites it per deployment target.
+        assert env["AWS_REGION"] == "us-west-2", runtime["name"]
+        assert env["HARNESS_MODEL"] == "bedrock/global.anthropic.claude-sonnet-4-6", runtime["name"]
+        assert env["HARNESS_EFFORT"] == "medium", runtime["name"]
+        assert env["HARNESS_MAX_SECONDS"] == "600", runtime["name"]
+        assert env["OPS_LOG_GROUP_PREFIXES"] == "/aws/lambda/,/aws/ecs/,/aws/apigateway/,/aws/eks/", runtime["name"]
 
 
 def test_jwt_authorizer_placeholders_are_valid_oidc_discovery_urls():
@@ -103,9 +110,36 @@ def test_additional_policy_files_resolve_against_code_location():
             assert (ROOT / runtime["codeLocation"] / entry).is_file(), entry
 
 
-def test_deny_policy_is_not_shipped_in_the_image():
+def test_dockerignore_excludes_build_only_inputs_but_keeps_runtime_files():
     ignored = {line.strip() for line in (APP / ".dockerignore").read_text().splitlines()}
-    assert "policies/" in ignored
+    # policies/ is read by CDK off the local disk, never from the image; the rest is build or
+    # local-run noise that has no business in a deployed container.
+    assert {"policies/", "tests/", ".venv/", ".agent/"} <= ignored
+    # AGENTS.md and skills/ are loaded from the working directory at runtime, so they must ship.
+    assert not {"AGENTS.md", "skills/", "skills"} & ignored
+
+
+def test_kms_decrypt_deny_is_scoped_away_from_the_image_pull_path():
+    # Image pull runs as the execution role. A blanket Deny on kms:Decrypt beats the CDK's grant on
+    # a CMK-encrypted ECR repository and the runtime can never start, so the deny must be
+    # conditioned to exclude calls made via ECR.
+    doc = _load(DENY_POLICY)
+    holders = [s for s in doc["Statement"] if "kms:decrypt" in _statement_actions(s)]
+    assert len(holders) == 1, holders
+    statement = holders[0]
+    assert statement["Condition"]["StringNotLike"]["kms:ViaService"] == ["ecr.*.amazonaws.com"]
+    # The unconditioned bucket must not quietly regain it.
+    unconditioned = [s for s in doc["Statement"] if "Condition" not in s]
+    assert all("kms:decrypt" not in _statement_actions(s) for s in unconditioned)
+
+
+def test_secret_material_deny_carries_the_credential_provider_caveat():
+    # JSON has no comments, so the caveat rides on an annotation key that CDK's
+    # PolicyDocument.fromJson drops before the policy reaches IAM.
+    doc = _load(DENY_POLICY)
+    by_sid = {s["Sid"]: s for s in doc["Statement"]}
+    assert "bedrock-agentcore-identity" in by_sid["NoSecretMaterial"]["Comment"]
+    assert "NotResource" in by_sid["NoSecretMaterial"]["Comment"]
 
 
 def test_root_policy_copy_matches_the_deployed_one():
