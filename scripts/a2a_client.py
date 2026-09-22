@@ -63,12 +63,21 @@ def _part_text(parts: object) -> str:
 
 
 def summarize_event(event: dict) -> str:
-    """One line per streamed response. The wire shape is the protobuf `StreamResponse` as JSON, so the
-    payload is under exactly one of task / message / statusUpdate / artifactUpdate."""
+    """One line per streamed response, plus a line per artifact on a Task. The wire shape is the protobuf
+    `StreamResponse` as JSON, so the payload is under exactly one of task / message / statusUpdate /
+    artifactUpdate."""
     if "task" in event:
         task = event["task"]
         state = (task.get("status") or {}).get("state", "")
-        return f"[task] id={task.get('id', '')} context={task.get('contextId', '')} state={state}"
+        lines = [f"[task] id={task.get('id', '')} context={task.get('contextId', '')} state={state}"]
+        # A non-streaming SendMessage answers with one Task and nothing else, so the answer arrives as
+        # `task.artifacts` rather than as its own `artifactUpdate` event. Reporting only the state here
+        # printed the task id and threw the answer away (P52).
+        lines += [
+            f"[artifact] {artifact.get('name', '')}: {_part_text(artifact.get('parts'))}"
+            for artifact in task.get("artifacts") or []
+        ]
+        return "\n".join(lines)
     if "statusUpdate" in event:
         status = event["statusUpdate"].get("status") or {}
         text = _part_text((status.get("message") or {}).get("parts"))

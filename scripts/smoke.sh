@@ -30,67 +30,59 @@ STATUS=$($AGENTCORE status --json)
 eval "$(uv run python - "$STATUS" <<'PY'
 """Print shell assignments for the deployed ids.
 
-`agentcore status --json` returns {"resources": [{"resourceType", "name", "deploymentState", ...}]}, and
-before the first deploy every entry is "local-only" with no ARN at all -- which field carries the ARN of
-a *deployed* runtime is confirmed in Task 15. So: look for an obvious key on the named resource first,
-then fall back to scanning the whole document for an ARN that belongs to that runtime.
+`agentcore status --json` (CLI 0.30.0, confirmed against a real deploy) returns:
+
+    {"success": true, "projectName": "...", "targetName": "default", "targetRegion": "...",
+     "resources": [{"resourceType": "agent" | "memory", "name": "OpsInvestigator",
+                    "deploymentState": "deployed", "identifier": "<arn>", "detail": "READY",
+                    "invocationUrl": "https://bedrock-agentcore.../invocations"}],
+     "deployedState": {"targets": {"default": {"resources": {
+         "runtimes": {"OpsInvestigator": {"runtimeId": "...", "runtimeArn": "arn:...", "roleArn": "arn:..."}},
+         "memories": {"OpsInvestigatorMemory": {"memoryId": "...", "memoryArn": "arn:..."}},
+         "stackName": "...", "deployHash": "..."}}}}}
+
+`deployedState` is the map to read: it is keyed by the names in agentcore.json and carries the id and
+the ARN as separate fields. `resources[]` is the display list, and is only a fallback here -- its
+`identifier` is an ARN even for the memory (whose id is the ARN's last path segment), and before the
+first deploy every entry is "local-only" with no identifier at all.
 """
 import json
-import re
 import shlex
 import sys
 
-ARN = re.compile(r"arn:aws[\w-]*:bedrock-agentcore:[^\s\"']+")
-
-
-def strings(node):
-    if isinstance(node, dict):
-        for value in node.values():
-            yield from strings(value)
-    elif isinstance(node, list):
-        for value in node:
-            yield from strings(value)
-    elif isinstance(node, str):
-        yield node
-
-
-def resource(status, name):
-    for item in status.get("resources") or status.get("runtimes") or []:
-        if item.get("name") == name:
-            return item
-    return {}
-
-
-def field(status, name, *keys):
-    item = resource(status, name)
-    return next((str(item[key]) for key in keys if item.get(key)), "")
-
-
-def runtime_arn(status, name):
-    found = field(status, name, "arn", "agentRuntimeArn", "runtimeArn")
-    if found:
-        return found
-    owned = [s for s in strings(status) if ARN.fullmatch(s) and (f"/{name}-" in s or s.endswith(f"/{name}"))]
-    return owned[0] if owned else ""
-
-
-def memory_id(status, name):
-    found = field(status, name, "id", "memoryId", "arn")
-    if found:
-        return found
-    return next((s for s in strings(status) if s.startswith(f"{name}-")), "")
-
-
 status = json.loads(sys.argv[1])
-print(f"export ARN={shlex.quote(runtime_arn(status, 'OpsInvestigator'))}")
-print(f"export A2A_ARN={shlex.quote(runtime_arn(status, 'OpsInvestigatorA2A'))}")
-print(f"export MEMORY_ID={shlex.quote(memory_id(status, 'OpsInvestigatorMemory'))}")
-print(f"# status keys: {sorted(status)}", file=sys.stderr)
+targets = (status.get("deployedState") or {}).get("targets") or {}
+target = targets.get(str(status.get("targetName") or "")) or next(iter(targets.values()), {})
+deployed = target.get("resources") or {}
+
+
+def listed(name):
+    """The `resources[]` entry for `name`, matched exactly: "OpsInvestigator" is a prefix of
+    "OpsInvestigatorA2A", so a substring match would hand back the wrong runtime."""
+    return next((r for r in status.get("resources") or [] if r.get("name") == name), {})
+
+
+def runtime_arn(name):
+    entry = (deployed.get("runtimes") or {}).get(name) or {}
+    return str(entry.get("runtimeArn") or listed(name).get("identifier") or "")
+
+
+def memory_id(name):
+    entry = (deployed.get("memories") or {}).get(name) or {}
+    return str(entry.get("memoryId") or (listed(name).get("identifier") or "").rsplit("/", 1)[-1])
+
+
+print(f"export ARN={shlex.quote(runtime_arn('OpsInvestigator'))}")
+print(f"export A2A_ARN={shlex.quote(runtime_arn('OpsInvestigatorA2A'))}")
+print(f"export MEMORY_ID={shlex.quote(memory_id('OpsInvestigatorMemory'))}")
+for item in status.get("resources") or []:
+    print(f"# {item.get('name')}: {item.get('deploymentState')} {item.get('detail', '')}", file=sys.stderr)
 PY
 )"
-: "${ARN:?OpsInvestigator has no ARN in agentcore status --json}"
-: "${A2A_ARN:?OpsInvestigatorA2A has no ARN in agentcore status --json}"
-: "${MEMORY_ID:?no memory id in agentcore status --json}"
+NOT_DEPLOYED="is empty in agentcore status --json; is the deploy above actually finished (deploymentState=deployed)?"
+: "${ARN:?OpsInvestigator $NOT_DEPLOYED}"
+: "${A2A_ARN:?OpsInvestigatorA2A $NOT_DEPLOYED}"
+: "${MEMORY_ID:?OpsInvestigatorMemory $NOT_DEPLOYED}"
 
 CLIENT_ID=$(uv run python -c "
 import json
@@ -125,13 +117,20 @@ make deploy
 bash scripts/demo.sh
 
 echo "== span check: one invoke_agent span per invoke (GenAI observability, spec 8)"
+# Two sources on purpose. `aws/spans` is where CloudWatch Transaction Search indexes spans, and it is what
+# the GenAI Observability console reads -- but enabling Transaction Search takes effect minutes after the
+# deploy that enabled it reports success, so a fresh account can have working tracing and an empty
+# `aws/spans` for a while. X-Ray answers straight away, so an empty span count is only news when X-Ray is
+# empty too; that distinction is the difference between "not indexed yet" and "not instrumented" (P52).
 uv run python - "$REGION" <<'PY'
+import datetime
 import sys
 import time
 
 import boto3
 
-logs = boto3.client("logs", region_name=sys.argv[1])
+region = sys.argv[1]
+logs = boto3.client("logs", region_name=region)
 now = int(time.time())
 query = logs.start_query(
     logGroupName="aws/spans",
@@ -139,14 +138,35 @@ query = logs.start_query(
     endTime=now,
     queryString="fields name | filter name like /invoke_agent ops-investigator/ | stats count() as n",
 )["queryId"]
+spans = None
 for _ in range(20):
     result = logs.get_query_results(queryId=query)
-    if result["status"] in ("Complete", "Failed", "Cancelled"):
-        print(result["status"], result.get("results"))
+    if result["status"] == "Complete":
+        rows = result.get("results") or []
+        spans = int(rows[0][0]["value"]) if rows else 0
+        break
+    if result["status"] in ("Failed", "Cancelled"):
+        print(f"aws/spans query {result['status']}")
         break
     time.sleep(3)
 else:
-    print("span query still running; check CloudWatch Logs Insights on aws/spans")
+    print("aws/spans query still running; check CloudWatch Logs Insights on aws/spans")
+
+if spans is not None:
+    print(f"invoke_agent spans in aws/spans (last 30 min): {spans}")
+
+end = datetime.datetime.now(datetime.timezone.utc)
+traces = boto3.client("xray", region_name=region).get_trace_summaries(
+    StartTime=end - datetime.timedelta(minutes=30), EndTime=end, TimeRangeType="Event"
+)["TraceSummaries"]
+ours = [t for t in traces if any("OpsInvestigator" in (s.get("Name") or "") for s in t.get("ServiceIds") or [])]
+print(f"X-Ray traces naming an OpsInvestigator runtime (last 30 min): {len(ours)}")
+if spans == 0 and ours:
+    print(
+        "Tracing works; Transaction Search has not indexed into aws/spans yet. It is enabled per region "
+        "and takes a few minutes to start delivering after the deploy that enabled it (P52). Re-run this "
+        "query later, or open GenAI Observability, which reads the same index."
+    )
 PY
 
 echo "== done. Teardown with: make destroy   (left up for the demo by default)"

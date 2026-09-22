@@ -25,12 +25,22 @@ def test_bad_effort_fails_as_config():
 
 
 def test_cloud_checks_tempdir_and_otel(monkeypatch, tmp_path):
+    """`otlp` is ADOT's own setting, not a human's: the distro sets it before the app starts, so warning
+    about it fired on every healthy cloud start and meant nothing (P52)."""
     monkeypatch.setattr(preflight.tempfile, "gettempdir", lambda: str(tmp_path))
     rep = preflight.run_preflight(env={**CLOUD, "OTEL_TRACES_EXPORTER": "otlp"}, probe_model=False)
     names = {c[0]: c[1] for c in rep.checks}
     assert names["tempdir"] == "PASS"
-    assert names["otel_exporter"] == "WARN"  # harness would fight ADOT for the exporter (P8)
+    assert names["otel_exporter"] == "PASS"
     assert rep.ok  # warnings never make preflight fail
+
+
+def test_cloud_warns_when_something_takes_the_exporter_away_from_adot(monkeypatch, tmp_path):
+    monkeypatch.setattr(preflight.tempfile, "gettempdir", lambda: str(tmp_path))
+    rep = preflight.run_preflight(env={**CLOUD, "OTEL_TRACES_EXPORTER": "console"}, probe_model=False)
+    names = {c[0]: c[1] for c in rep.checks}
+    assert names["otel_exporter"] == "WARN"  # harness would fight ADOT for the exporter (P8)
+    assert rep.ok
 
 
 def test_cloud_unwritable_tempdir_fails(monkeypatch, tmp_path):

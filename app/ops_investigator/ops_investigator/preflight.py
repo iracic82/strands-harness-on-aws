@@ -14,6 +14,13 @@ from ops_investigator import platform
 
 log = logging.getLogger("ops_investigator.preflight")
 
+# What ADOT sets `OTEL_TRACES_EXPORTER` to, itself, when it owns tracing. The container never sets this
+# variable, but `opentelemetry-instrument` loads the ADOT distro before the app starts and the distro does
+# `os.environ.setdefault(OTEL_TRACES_EXPORTER, "otlp")` under AgentCore's agent-observability mode
+# (amazon/opentelemetry/distro/aws_opentelemetry_distro.py). So "set to otlp" is the healthy state, and
+# only some *other* value means a human took the exporter away from ADOT (P8, P52).
+ADOT_TRACES_EXPORTER = "otlp"
+
 # The fix a human should apply, keyed by the Bedrock error code a 1-token ConverseStream returns (P25).
 ACCOUNT_DENIED = "not available for this account"
 MODEL_FIXES = {
@@ -122,10 +129,15 @@ def run_preflight(env: Mapping[str, str] | None = None, *, probe_model: bool = T
     except OSError as e:
         rep.add("tempdir", "FAIL", f"{tmp} is not writable: {e}. The harness needs a writable workspace (P2).")
     rep.add("memory_id", "PASS", rt.memory_id or "")
-    if env.get("OTEL_TRACES_EXPORTER"):
-        rep.add("otel_exporter", "WARN", "OTEL_TRACES_EXPORTER is set; ADOT should own the exporter in AgentCore (P8).")
+    exporter = env.get("OTEL_TRACES_EXPORTER", "")
+    if exporter and exporter != ADOT_TRACES_EXPORTER:
+        rep.add(
+            "otel_exporter",
+            "WARN",
+            f"OTEL_TRACES_EXPORTER={exporter!r}; ADOT should own the exporter in AgentCore (P8).",
+        )
     else:
-        rep.add("otel_exporter", "PASS", "unset; ADOT owns tracing")
+        rep.add("otel_exporter", "PASS", f"{exporter or 'unset'}; ADOT owns tracing")
     if probe_model:
         _check_model(rep, rt)
     return rep

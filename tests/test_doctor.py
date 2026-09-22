@@ -254,7 +254,10 @@ def test_docker_check_skipped_for_codezip_build():
     assert not any(c.name == "docker_arm64" for c in checks)
 
 
-def test_docker_arm64_missing_platform_is_fail():
+def test_docker_arm64_missing_platform_warns_because_deploy_builds_on_codebuild():
+    """A deploy builds both images on an ARM CodeBuild host, so no local Docker is involved and this
+    must not be the FAIL that stops `make doctor` and scripts/smoke.sh (P52)."""
+
     def run_cmd(args, **k):
         from types import SimpleNamespace
 
@@ -264,7 +267,8 @@ def test_docker_arm64_missing_platform_is_fail():
 
     checks = doctor.run("us-west-2", "m", "s", clients=_clients(), which=_tools(), run_cmd=run_cmd)
     c = next(c for c in checks if c.name == "docker_arm64")
-    assert c.status == "FAIL" and c.fix != ""
+    assert c.status == "WARN" and c.fix != ""
+    assert doctor.worst(checks) < 2  # a WARN never stops a deploy that would have worked
 
 
 def test_availability_id_strips_the_known_inference_profile_prefixes():
