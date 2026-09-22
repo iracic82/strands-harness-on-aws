@@ -64,26 +64,33 @@ def test_unknown_tools_proceed():
     assert isinstance(ReadOnlyGuard().before_tool_call(_event("search_memory", {"query": "x"})), Proceed)
 
 
-def test_non_dict_tool_input_does_not_crash():
+def test_non_dict_tool_input_fails_closed():
     r = ReadOnlyGuard().before_tool_call(_event("aws_call", "ec2:describe_instances"))
     assert isinstance(r, Deny)
     g = ReadOnlyGuard(denied_tools=frozenset())
     r2 = g.before_tool_call(_event("shell", "aws ec2 describe-instances"))
-    assert isinstance(r2, Proceed)
+    assert isinstance(r2, Deny)
 
 
 @pytest.mark.parametrize(
     "cmd,expect_proceed",
     [
+        ("aws ec2 describe-instances", True),
         ("aws ec2 describe-instances --filters Name=tag:Env,Values=start-prod", True),
         ("aws --profile x --region us-west-2 ec2 describe-instances", True),
+        ("aws --no-cli-pager ec2 describe-instances", True),
         ("aws s3 ls s3://b", True),
         ("aws ec2 cancel-spot-instance-requests", False),
         ("aws ssm get-parameter --name x", False),
         ("aws secretsmanager get-secret-value --secret-id x", False),
-        ("echo hello && aws sts get-caller-identity", True),
+        ("echo hello && aws sts get-caller-identity", False),
         ("aws", False),
         ('aws ec2 "describe-instances', False),  # unbalanced quote
+        ("AWS ec2 terminate-instances --instance-ids i-1", False),  # case-insensitive command name
+        ("echo $(aws ec2 terminate-instances --instance-ids i-1)", False),  # command substitution
+        ("`aws ec2 terminate-instances --instance-ids i-1`", False),  # backtick command substitution
+        ("true;aws ec2 terminate-instances --instance-ids i-1", False),  # semicolon chaining
+        ("aws ec2 describe-instances&&aws ec2 terminate-instances --instance-ids i-1", False),  # && chaining
     ],
 )
 def test_shell_read_only_verb_allowlist(cmd, expect_proceed):
