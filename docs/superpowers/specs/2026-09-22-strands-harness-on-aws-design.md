@@ -1,233 +1,355 @@
-# strands-harness-on-aws — Design Spec
+# strands-harness-on-aws — Design Spec (v2)
 
 Date: 2026-09-22
-Status: approved by owner, pending reviewer pass
+Status: v2, post review (Backend Architect, Security Architect, Multi-Agent Systems Architect); pending owner sign-off
 Owner: Igor Racic (iracic82)
 
 ## 1. Purpose
 
 A cloneable, production-grade reference for running the **Strands harness**
-(`strands-harness`, the one-call `create_harness()` agent introduced in
+(`strands-harness`, the one-call `create_harness()` agent from
 https://strandsagents.com/blog/introducing-strands-harness/) on AWS the right way:
 locally in five minutes, then on **Amazon Bedrock AgentCore Runtime** with
-**AgentCore Memory** and **CloudWatch GenAI Observability**, with every known
-pitfall either fixed in code or caught by a preflight check before it costs the
-user an afternoon.
+**AgentCore Memory**, **JWT inbound auth**, an **A2A endpoint with a spec-1.0 agent
+card**, and **CloudWatch GenAI Observability**. Every known pitfall is either fixed
+in code or caught by a preflight check before it costs the user an afternoon.
 
-It is the successor to https://github.com/iracic82/AWS_AgentLab (a step-by-step
-lab on the raw Strands SDK). This repo is not a tutorial: it is a golden path
-plus a `doctor`, meant to be demoed live and copied into real projects.
+Successor to https://github.com/iracic82/AWS_AgentLab (a lab on the raw Strands SDK).
+This repo is a golden path plus a `doctor`, meant to be demoed live and copied into
+real projects.
 
 ### Non-goals (v1)
 
-- AgentCore Gateway, Identity (inbound OAuth), Code Interpreter, Browser.
+- AgentCore Gateway, outbound OAuth, Code Interpreter, Browser.
+- The AgentCore **`harnesses[]` resource** (`AWS::BedrockAgentCore::Harness`, a
+  declarative AWS product). Unrelated to `strands-harness`; named here so readers do
+  not conflate them.
 - TypeScript harness parity.
-- Multi-region or multi-account deployment.
+- VPC network mode, multi-region, multi-account.
 - Any write/mutating AWS operation by the agent.
+- Human-in-the-loop approval (the seam is left; see 6.3).
 
-## 2. Decisions already made
+## 2. Decisions
 
 | Decision | Choice | Why |
 |---|---|---|
 | Repo shape | Golden path + standalone `doctor.py` | Demo-able and reusable |
-| Demo domain | **AWS Ops Investigator** (read-only account diagnosis) | Relatable to every AWS builder, safe to run live, no fake data |
-| AgentCore depth | Runtime + Memory + Observability | Fixes the real traps without doubling scope |
-| Wiring | **Harness-first**: one `create_harness()` factory, backends switched by env | Keeps the harness's tuned defaults (the point of the blog) |
-| Build | **Container** (arm64) via the new `@aws/agentcore` CLI (CDK) | Headroom for ~205 MB deps; teaches the arch trap deliberately |
-| Deploy tool | `@aws/agentcore` npm CLI 0.30+, `agentcore.json`, CDK | The Python `bedrock-agentcore-starter-toolkit` is deprecated |
-| Default model | `bedrock/global.anthropic.claude-sonnet-5`, effort `medium` | Harness default (Opus 5 / high) is costly for a demo; env-overridable |
+| Demo domain | **AWS Ops Investigator**, read-only account diagnosis | Relatable, safe live, no fake data |
+| AgentCore depth | Runtime + Memory + Observability + JWT inbound auth + A2A runtime | Real production traps covered; Gateway/Identity-outbound deferred |
+| Wiring | **Harness-first**: one `build_agent()` -> `create_harness()`, backends switched by env | Keeps the harness's tuned defaults |
+| Build | **Container** (arm64) via `@aws/agentcore` CLI 0.30+ (CDK) | ~205 MB deps; teaches the arch trap |
+| Deploy tool | npm `@aws/agentcore`, `agentcore.json`; generated CDK kept pristine | Python starter toolkit is deprecated |
+| Inbound auth | **`CUSTOM_JWT` via Cognito**; actor id from JWT `sub` | Closes actor spoofing of memory; IAM SigV4 documented as alternative |
+| Protocols | Runtime 1: HTTP (SSE). Runtime 2: A2A on `a2a-sdk` 1.x, card at `/.well-known/agent-card.json`, `protocolVersion` 1.0 | AgentCore allows one protocol per runtime; Strands `A2AServer` is 0.3-only |
+| Cloud tool profile | `read` + AWS tools + programmatic tool caller + fixed `reader` subagent. **No shell, no web_fetch, no write/edit** in cloud | Removes the exfiltration channel on public network mode |
+| Network mode | PUBLIC (non-goal: VPC) | Simplicity; safe only because of the tool profile above |
+| Default model | `bedrock/global.anthropic.claude-sonnet-5`, effort `medium` (reader: `low`) | Harness default Opus 5 / high is costly; env-overridable |
+| Limits | `Limits(turns=25, output_tokens=60_000, total_tokens=1_500_000)`; wall clock 600 s; reader `Limits(12, 20_000, 400_000)` | Cost ceiling ≈ $8/turn worst case, ≈ $1/turn typical |
 | Default region | `us-west-2` | Owner's account already runs AgentCore there |
-| Language | Python 3.12 in the image (CLI template), 3.10+ supported | Harness requires >=3.10; tested on 3.12 and 3.14 |
+| Python | 3.12 in the image; 3.10+ supported; `runtimeVersion: PYTHON_3_12` | Harness >= 3.10; tested 3.12 and 3.14 |
 | Licence | Apache-2.0 | Matches upstream |
 
-## 3. Pitfall inventory (what the repo must handle)
+## 3. Pitfall inventory
 
 Verified 2026-09-22 against `strands-harness` 0.1.1, `strands-agents` 1.56.0,
-`bedrock-agentcore` 1.23.1, `@aws/agentcore` 0.30.0, and the owner's account.
+`bedrock-agentcore` 1.23.1, `@aws/agentcore` 0.30.0 (`@aws/agentcore-cdk`
+0.1.0-alpha.53), `a2a-sdk` 1.1.5, and account 123456789012.
 
 | # | Pitfall | Evidence | Handling |
 |---|---|---|---|
-| P1 | Python starter toolkit / old `agentcore` CLI is deprecated; tutorials point the wrong way | AgentCore runtime guide "Migration" section | `doctor` detects old toolkit, README uses only the npm CLI |
-| P2 | Harness persists sessions, memory, skills under `./.agent/*`; AgentCore working dir (`/app`) is read-only for the non-root user and the microVM is ephemeral | Harness `defaults.py`; CLI skills fetcher comment ("runtime working directory is read-only") | `platform.py` switches to AgentCore Memory and a `/tmp` workspace; preflight asserts writability |
-| P3 | Two overlapping memory systems (harness file extractor on Haiku + AgentCore strategies) | Harness `resolve_memory`; `AgentCoreMemorySessionManager.retrieval_config` | Single writer: AgentCore strategies extract; harness extraction off in cloud |
-| P4 | Hidden second model: Haiku 4.5 (global profile) used for `web_fetch` and memory extraction | Harness `models.py` `_WEB_FETCH_MODELS` | `doctor` checks Haiku availability; documented |
-| P5 | No `AWS_REGION` -> empty model list / silent failures | harness-sdk issue #4481 | `doctor` + preflight hard-fail with fix text |
-| P6 | Default model is Opus 5 at effort `high` (extended thinking) | Harness `defaults.py` | Sonnet 5 / medium default, `HARNESS_MODEL`, `HARNESS_EFFORT` env |
-| P7 | AgentCore Runtime is regional; account may have it enabled in one region only | Owner account: runtimes in us-west-2, none in us-east-1 | `doctor` probes control plane in the chosen region |
-| P8 | CloudWatch Transaction Search must be enabled once per region or traces never appear; ADOT env vars required in the container | AgentCore observability doc | `doctor` checks Transaction Search; Dockerfile keeps `opentelemetry-instrument`; env set by CDK |
-| P9 | Runtime session ID must be >= 33 chars | AgentCore runtime guide | `main.py` normalises/pads; client scripts generate UUID4 hex x2 |
-| P10 | A persisted pending interrupt (approval) wedges a resumed session | harness-sdk issues #4470, #4202 | Read-only agent uses deny (not ask) interventions; resumed sessions with pending interrupt are logged and dismissed |
-| P11 | `BedrockModel` drops default read timeout when `boto_client_config` is passed | issue #4394 | Explicit `Config(read_timeout=..., retries=...)` |
-| P12 | Unknown `limits` keys are silently ignored | issue #4354 | Limits set through typed config; unit test asserts they apply |
-| P13 | Stalled MCP tool call hangs the agent | issue #4403 | MCP servers opt-in, `continue_on_error`, tool timeouts |
-| P14 | Sync `add_memory` writes can be lost | issue #4418 | Agent invoked via `stream_async` only; flush on shutdown |
-| P15 | Guardrail ID without version silently sends no guardrail | issue #4204 | Not used in v1; documented in PITFALLS |
-| P16 | arm64-only containers ("exec format error") | AgentCore runtime guide | CDK builds `--platform linux/arm64`; `doctor` checks buildx |
-| P17 | Global inference profiles need `bedrock:InvokeModel*` on the foundation-model ARNs in every routed region | Bedrock cross-region inference docs | Execution role policy covers `arn:aws:bedrock:*::foundation-model/*` + the profile ARNs |
-| P18 | Version drift: harness 0.1.1 is one day old, `pydantic-monty` pinned exactly, CLI templates target Python 3.14 | PyPI metadata | `uv.lock` committed; CI installs from lock; README states tested versions |
-| P19 | `web_search` is off on Bedrock Converse; naming it raises; Exa fallback sends queries to a third party | Harness README | `web_search` left off; documented |
-| P20 | Old `agentcore` Python binary shadows the npm one on PATH | Owner's machine | `doctor` warns when `agentcore --version` is not the npm CLI |
+| P1 | Python starter toolkit / old `agentcore` CLI deprecated; tutorials point the wrong way | Runtime guide "Migration" | `doctor` detects old toolkit on PATH; README uses only npm CLI |
+| P2 | Harness persists sessions/memory/skills under `./.agent/*`; container `/app` is read-only for the non-root user; microVM ephemeral | `defaults.py`; CLI skills fetcher comment | `platform.py` switches to AgentCore Memory; `os.chdir(workspace)` under `tempfile.gettempdir()`; preflight asserts writability |
+| P3 | Two memory writers (harness Haiku extractor + AgentCore strategies) **and** two readers (session-manager `retrieval_config` + harness injection) | `resolve_memory`, `session_manager.py:843-910` | Single writer: AgentCore strategies. Single reader: harness stores over AgentCore (`create_agentcore_memory_stores(extraction=False)`), `retrieval_config=None` |
+| P4 | Hidden second model: Haiku 4.5 for `web_fetch` + memory extraction | `models.py` `_WEB_FETCH_MODELS` | Cloud profile drops `web_fetch`, extraction off -> no second model in cloud; `doctor` still checks Haiku for local mode |
+| P5 | No `AWS_REGION` -> empty model list / silent failures | issue #4481 | `doctor` + preflight hard-fail with fix text |
+| P6 | Default Opus 5 / effort high | `defaults.py` | Sonnet 5 / medium; `HARNESS_MODEL`, `HARNESS_EFFORT` |
+| P7 | AgentCore Runtime regional; account enabled per region | Owner account: us-west-2 only | `doctor` probes control plane in chosen region |
+| P8 | CloudWatch Transaction Search must be enabled once per region; ADOT env required; harness telemetry must not own the exporter | Observability doc; `strands/telemetry/config.py:111-114` | `doctor` checks Transaction Search (`xray:GetTraceSegmentDestination`); Dockerfile `CMD opentelemetry-instrument`; `OTEL_TRACES_EXPORTER` **unset** in container |
+| P9 | `runtimeSessionId` >= 33 chars; service rejects short ids before the container | Runtime guide | `main.py` rejects < 33 (400) in dev mode; scripts generate compliant ids |
+| P10 | A policy **string** passed to `interventions` becomes an LLM classifier that pauses with an interrupt; pending interrupts persist with the session and wedge resume | `strands_harness/interventions.py:45-65`, `hitl.py:75-84`, issues #4470/#4202 | `ReadOnlyGuard(InterventionHandler)` returning `Deny`; never `Confirm`; unit test asserts no `Confirm` |
+| P11 | `BedrockModel` with `boto_client_config` drops the 120 s default read timeout | issue #4394, `bedrock.py:270-290` | String model path is default; `HARNESS_BOTO_READ_TIMEOUT` escape hatch replicates `_bedrock()` kwargs, unit test diffs |
+| P12 | `Limits` accepts only `turns`, `output_tokens`, `total_tokens`; other keys silently ignored | issue #4354, `agent.py:1850-1870` | Typed `Limits(...)`; test `set(LIMITS) <= set(Limits.__annotations__)`; stub-model trip test |
+| P13 | Stalled MCP tool call hangs the agent | issue #4403 | MCP opt-in, `continue_on_error`, streamable-HTTP endpoint (no `uvx` at cold start) |
+| P14 | Fire-and-forget memory writes lost on sync path; sync session manager blocks the stream | issue #4418; `session_manager.py:943-951` | `stream_async` only; `AgentCoreMemoryConfig(async_mode=True)`; `session_manager.close()` in lifespan |
+| P15 | Guardrail ID without version silently sends none | issue #4204 | Not used; documented |
+| P16 | arm64-only containers ("exec format error") | Runtime guide | CDK builds arm64; `doctor` checks buildx; CI builds arm64 |
+| P17 | Global inference profiles need model permissions in every routed region | Bedrock docs | Already granted by the L3 runtime role (`foundation-model/*`, `inference-profile/*`); documented |
+| P18 | Version drift: harness 1 day old, `pydantic-monty` exact pin, CLI templates say Python 3.14 | PyPI | `uv.lock` committed, CI from lock, base image pinned by digest, Dependabot |
+| P19 | `web_search` off on Bedrock; naming it raises; Exa fallback ships queries to a third party | Harness README | Off; documented |
+| P20 | Old Python `agentcore` binary shadows npm one on PATH | Owner's Mac | `doctor` warns |
+| P21 | `builtin_tools` **mapping** edits defaults (shell, write, edit, web_fetch stay on); only a list or `{"*": False, ...}` pins | `options.py:80-94` | Cloud: `{"*": False, "read": True, "programmatic_tool_caller": {...}}` |
+| P22 | Strands `A2AServer` pins `a2a-sdk` 0.3.x (spec 0.3: `kind` discriminators, `supportsAuthenticatedExtendedCard`); A2A spec is 1.0 (`/.well-known/agent-card.json`, `capabilities.extendedAgentCard`); AWS A2A guide still shows 0.3 shapes | `strands-py/pyproject.toml`; a2a-protocol.org Appendix A | A2A runtime on `a2a-sdk` 1.x with own executor; client script handles both shapes |
+| P23 | Offloaded tool results go to `tempfile.mkdtemp` when a `SessionManager` instance is passed; restored history in a new microVM references dead files | `strands_harness/agent.py:494-500` | `filter_restored_tool_context=True`; document artifacts are per-microVM |
+| P24 | `RequestContext` has no `user_id`; CLI template's `getattr(context, 'user_id', ...)` is always the default | `bedrock_agentcore/runtime/context.py:17` | Actor from JWT `sub` in the allowlisted `Authorization` header |
+| P25 | `GetFoundationModelAvailability` is ambiguous (Sonnet 5 shows `agreementAvailability: NOT_AVAILABLE` yet `AUTHORIZED`); only a real call proves access | Owner account probe | `doctor` performs a 1-token `Converse` on each required model |
+| P26 | Managed `ReadOnlyAccess` reads secrets: SSM SecureString (via `aws/ssm` key), S3 bodies, DynamoDB rows, Lambda/ECS env, EC2 user-data, CFN templates, the agent's own log groups | Security review | Explicit Deny statements via `additionalPolicies`; tool-level (service, operation) allowlist |
+| P27 | Strategy extraction is asynchronous; a two-session demo without a wait flakes | memorystore README | `demo.sh` polls `retrieve_memory_records` (180 s) before session B |
 
 ## 4. Architecture
 
 ```
-laptop                                   AWS (us-west-2)
-──────                                   ───────────────────────────────────────────
-make dev ─► agentcore dev (:8080) ─┐     agentcore deploy (CDK) ─► ECR (arm64 image)
-                                   │                            └► AgentCore Runtime
-make invoke ───────────────────────┼────────────────────────────►   └ microVM per session
-                                   │                                  main.py (SSE)
-                                   ▼                                  └ build_agent()
-                            build_agent()                                └ create_harness()
-                             └ create_harness()                              ├ Bedrock (Sonnet 5, cached)
-                                ├ session: disk ./.agent/sessions            ├ session: AgentCoreMemorySessionManager
-                                ├ memory:  file store + Haiku extractor      ├ memory: AgentCore Memory (strategies extract)
-                                ├ skills:  ./app/.../skills                  ├ skills: baked into image
-                                └ tools: built-ins + aws_call/logs/cost      └ workspace: /tmp/workspace
-                                                                            traces ─► ADOT ─► CloudWatch GenAI Observability
+laptop                                     AWS us-west-2 (account 123456789012 for the owner)
+──────                                     ───────────────────────────────────────────────────────────
+make dev ─► agentcore dev :8080            agentcore deploy (CDK) ─► ECR (arm64) ─► AgentCore Runtime
+make invoke / demo.sh                        ├─ Runtime "OpsInvestigator"   HTTP :8080  CUSTOM_JWT (Cognito)
+                                             ├─ Runtime "OpsInvestigatorA2A" A2A :9000   CUSTOM_JWT (Cognito)
+        build_agent()                        ├─ Memory "OpsInvestigatorMemory" (USER_PREFERENCE, SEMANTIC*)
+         └ create_harness()                  └─ env: MEMORY_OPSINVESTIGATORMEMORY_ID, AWS_REGION, HARNESS_*
+            local profile                          both runtimes ─► build_agent() cloud profile
+            ├ session: ./.agent/sessions             ├ session: AgentCoreMemorySessionManager (events only, async)
+            ├ memory:  file store + Haiku            ├ memory:  harness stores over AgentCore (read; no extractor)
+            ├ skills:  app/.../skills                ├ skills:  baked in image
+            ├ tools: harness defaults + AWS tools    ├ tools: read + aws_call/logs_insights/cost_explorer
+            └ interventions: ReadOnlyGuard           │         + programmatic_tool_caller(allowed) + reader subagent
+                                                     ├ interventions: ReadOnlyGuard (Deny only)
+                                                     └ workspace: $TMPDIR/workspace (cwd)
+                                             traces ─► ADOT (opentelemetry-instrument) ─► CloudWatch GenAI Observability
+Cognito user pool + app client (scripts/auth_bootstrap.py) ─► discovery URL + client id into agentcore.json
 ```
 
 ### 4.1 Components
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `app/ops_investigator/main.py` | `BedrockAgentCoreApp` entrypoint; payload validation; per-session agent cache; SSE streaming; `/ping` | `agent.py`, `platform.py`, `preflight.py` |
-| `agent.py` | `build_agent(session_id, actor_id) -> strands.Agent` via `create_harness()`; instructions; tool list; interventions | `platform.py`, `tools/` |
-| `platform.py` | `Runtime` dataclass: `is_agentcore`, `region`, `memory_id`, `workspace`; factories `session_manager()`, `memory_option()`, `skills_option()` | `bedrock_agentcore.memory.integrations.strands`, env |
-| `preflight.py` | Startup checks, structured log lines, hard-fail only on unrecoverable config | boto3 |
-| `tools/aws_call.py` | Read-only boto3 tool: allowlisted verbs (`Describe*`, `List*`, `Get*`, `Lookup*`, `Search*`, `Query*`), 30 s timeout, structured error text | boto3 |
-| `tools/logs_insights.py` | Start + poll a CloudWatch Logs Insights query with a bounded window | boto3 |
-| `tools/cost_explorer.py` | `GetCostAndUsage` grouped by service for a date range | boto3 |
-| `skills/investigate-incident/SKILL.md` | Runbook the model loads on demand | — |
-| `AGENTS.md` (app) | Injected by the harness `environment` plugin each turn | — |
-| `doctor.py` (repo root) | Standalone preflight, boto3 only, exit code = worst status | boto3, subprocess |
-| `agentcore/` | `agentcore.json`, `aws-targets.json`, CDK app (generated, committed, customised for env vars + role policies) | `@aws/agentcore`, CDK |
-| `Makefile` | `doctor dev invoke test deploy logs smoke destroy` | all of the above |
-| `scripts/demo.sh` | Two-session demo proving memory survival | `agentcore invoke` |
-| `tests/` | unit (no network) + `live` marked tests | pytest, botocore Stubber |
+| `app/ops_investigator/main.py` | `BedrockAgentCoreApp` HTTP entrypoint; payload schema; JWT actor extraction; LRU agent cache keyed by session; per-session lock; versioned SSE events; wall-clock timeout; limit-trip handling; lifespan close | `agent.py`, `platform.py`, `preflight.py`, `auth.py` |
+| `app/ops_investigator/a2a_main.py` | A2A 1.0 server (`a2a-sdk` 1.x Starlette app) with `HarnessExecutor` bridging `message/send` and `message/stream` to `build_agent().stream_async`; serves the hand-written card | `agent.py`, `platform.py`, `auth.py`, `agent_card.py` |
+| `agent_card.py` | Builds the 1.0 `AgentCard`: `protocolVersion`, `name`, `description`, `url`, `version`, `capabilities{streaming, pushNotifications:false, extendedAgentCard:false}`, `defaultInputModes/OutputModes` (`text/plain`), `skills[]` (ids `investigate-incident`, `cost-review`, `inventory`), `securitySchemes{cognito: openIdConnect(discoveryUrl)}`, `security[{cognito: []}]`, `provider` | env (`A2A_PUBLIC_URL`, `COGNITO_DISCOVERY_URL`) |
+| `agent.py` | `build_agent(session_id, actor_id, profile) -> Agent` via `create_harness()`; `LIMITS`; `ReadOnlyGuard`; `reader` subagent via `make_subagent`; instructions | `platform.py`, `tools/`, `guard.py` |
+| `guard.py` | `ReadOnlyGuard(InterventionHandler)`: `before_tool_call` returns `Deny` for non-allowlisted tools and non-read `aws_call` operations; logs a structured line per denial; never returns `Confirm` | strands interventions |
+| `platform.py` | `Runtime` dataclass (`profile`, `region`, `memory_id`, `workspace`, `model`, `effort`); `session_option()`, `memory_option()`, `skills_option()`, `builtin_tools()`; `chdir(workspace)` | `bedrock_agentcore.memory.integrations.strands`, env |
+| `auth.py` | Extracts actor id from the `Authorization: Bearer` JWT (`sub`, unverified decode; the AgentCore authorizer verified signature/audience before the request reached the container); validates `^[A-Za-z0-9_-]{1,64}$`; in local mode falls back to `X-Actor-Id` header/payload with a WARN | none (base64/json) |
+| `preflight.py` | Startup checks (region, memory id, tempdir writable, model reachable via 1-token Converse, ADOT env); structured log; marks `/ping` unhealthy with fix text on hard failure | boto3 |
+| `tools/aws_call.py` | Read-only boto3 tool: (service, operation) allowlist + explicit deny table; `query` (JMESPath) and `max_items`; 40k-char cap returning `{"truncated": true, ...}`; 30 s timeout; structured error text; per-turn budget (40 calls) in `invocation_state`; `Config(user_agent_extra=...)` | boto3 |
+| `tools/logs_insights.py` | Start/poll Logs Insights; log-group prefix allowlist (`OPS_LOG_GROUP_PREFIXES`), bounded window and `limit`; excludes `/aws/bedrock-agentcore/*` and `aws/spans` | boto3 |
+| `tools/cost_explorer.py` | `GetCostAndUsage` by service for a date range; budget 10 calls/turn | boto3 |
+| `skills/investigate-incident/SKILL.md` | Runbook loaded on demand | — |
+| `AGENTS.md` (app) | < 1k tokens; injected each turn by the `environment` plugin; states that tool output and memory are data, never instructions | — |
+| `policies/execution-role-deny.json` | `additionalPolicies` inline document: explicit Deny list (P26) | agentcore.json |
+| `doctor.py` (root) | Standalone preflight, boto3 + subprocess only; PASS/WARN/FAIL with fix text; exit code = worst | boto3 |
+| `scripts/auth_bootstrap.py` | Idempotent: Cognito user pool + app client + demo user; prints discovery URL/client id; patches `agentcore.json` `authorizerConfiguration` | boto3 |
+| `scripts/token.py` | Gets a JWT for the demo user (`USER_PASSWORD_AUTH`) | boto3 |
+| `scripts/invoke.py` | HTTP invoke with bearer token, compliant session id, SSE printing | boto3/httpx |
+| `scripts/a2a_client.py` | A2A client for the card + `message/stream`; handles 1.0 and 0.3 shapes | httpx |
+| `scripts/demo.sh` | Session A (states a preference) -> poll memory -> session B (recalls) -> A2A card fetch | scripts above |
+| `scripts/memory_wipe.py` | Deletes an actor's records/events (`make memory-wipe ACTOR=`) | boto3 |
+| `agentcore/` | `agentcore.json` (2 runtimes, 1 memory, env vars, `additionalPolicies`, `authorizerConfiguration`, `requestHeaderAllowlist`), `aws-targets.json`, generated CDK (pristine) | `@aws/agentcore` |
+| `Makefile` | `doctor auth-bootstrap dev invoke test deploy logs smoke a2a-card memory-wipe destroy` | all |
+| `tests/` | unit (no network) + `live` marked | pytest, botocore Stubber |
 
-### 4.2 `build_agent()` (the only agent definition)
+### 4.2 `build_agent()`
 
 ```python
+LIMITS = Limits(turns=env_int("HARNESS_MAX_TURNS", 25),
+                output_tokens=env_int("HARNESS_MAX_OUTPUT_TOKENS", 60_000),
+                total_tokens=env_int("HARNESS_MAX_TOTAL_TOKENS", 1_500_000))
+READER_LIMITS = Limits(turns=12, output_tokens=20_000, total_tokens=400_000)
+AWS_TOOLS = [aws_call, logs_insights, cost_explorer]
+
+def build_reader(spec: AgentSpec) -> Agent:          # fixed role, own caps, low effort
+    return create_harness(model=spec.model or rt.model, effort="low",
+        instructions=spec.instructions, tools=AWS_TOOLS,
+        builtin_tools={"*": False, "read": True}, session=False, memory=False, skills=False,
+        interventions=[ReadOnlyGuard()], limits=READER_LIMITS,
+        trace_attributes={"session.id": rt.session_id, "agent.role": "reader"})
+
+reader = make_subagent(builder=build_reader,
+    presets={"reader": Preset(instructions=READER_PROMPT, context="none",
+                              description="reads and summarises AWS state for one narrow question")},
+    instructions=Fixed(None), model=Inherit(), max_depth=1)
+
 def build_agent(session_id: str, actor_id: str) -> Agent:
-    rt = platform.detect()
+    rt = platform.detect(session_id, actor_id)       # chdir(workspace) happens here
     return create_harness(
-        model=rt.model,                      # HARNESS_MODEL, default bedrock/global.anthropic.claude-sonnet-5
-        effort=rt.effort,                    # HARNESS_EFFORT, default "medium"
-        instructions=OPS_INSTRUCTIONS,
-        tools=[aws_call, logs_insights, cost_explorer],
-        mcp_servers=rt.mcp_servers,          # AWS docs MCP when ENABLE_AWS_DOCS_MCP=1, else None
-        builtin_tools={"subagent": {"max_depth": 1}},   # web_search stays off on Bedrock (P19)
-        session=rt.session_option(session_id, actor_id),
-        memory=rt.memory_option(actor_id),
+        model=rt.model, effort=rt.effort, instructions=OPS_INSTRUCTIONS,
+        tools=[*AWS_TOOLS, reader],
+        mcp_servers=rt.mcp_servers,                  # streamable-HTTP AWS docs MCP when ENABLE_AWS_DOCS_MCP=1
+        builtin_tools=rt.builtin_tools(),            # cloud: {"*": False, "read": True,
+                                                     #   "programmatic_tool_caller": {"allowed_tools": [...AWS_TOOLS names], "timeout": 60}}
+                                                     # local: {"subagent": False, "web_search": False}  (harness defaults otherwise)
+        background_tasks={"agentic": [], "max_concurrency": 2, "timeout": 300},
+        session=rt.session_option(),                 # cloud: AgentCoreMemorySessionManager(async_mode=True,
+                                                     #   retrieval_config=None, filter_restored_tool_context=True)
+        memory=rt.memory_option(),                   # cloud: {"stores": create_agentcore_memory_stores(..., extraction=False)}
         skills=rt.skills_option(),
-        interventions=READ_ONLY_POLICY,      # deny mutating tool calls; no "ask" (P10)
-        caching="auto",
-        context_manager="auto",
+        interventions=[ReadOnlyGuard()],
+        caching="auto", context_manager="auto",
+        name="ops-investigator", limits=LIMITS,
+        trace_attributes={"session.id": session_id, "user.id": actor_id,
+                          "gen_ai.request.model": rt.model, "harness.effort": rt.effort},
     )
 ```
 
-`platform.detect()` returns local backends when `MEMORY_*_ID` is absent and
-AgentCore backends when present. Model construction goes through the harness
-`provider/name` string so effort mapping and cache points stay the harness's
-responsibility; the boto read-timeout fix (P11) is applied by passing a
-`BedrockModel` instance only when `HARNESS_BOTO_READ_TIMEOUT` is set, in which case
-`effort` is configured on the instance (harness ignores `effort` for instances).
+`profile` is `cloud` when `MEMORY_OPSINVESTIGATORMEMORY_ID` is set, else `local`.
+Model construction always goes through the harness `provider/name` string (so
+effort mapping, thinking budget and cache points are the harness's). The
+`HARNESS_BOTO_READ_TIMEOUT` escape hatch builds a `BedrockModel` replicating
+`_bedrock()`'s kwargs and is covered by a unit test that diffs both configs (P11).
 
-### 4.3 Memory policy (P3) — to be confirmed in implementation
+### 4.3 Memory policy (P3), settled
 
-Preferred: `memory={"stores": create_agentcore_memory_stores(memory_id, actor_id,
-session_id, namespaces=[facts, preferences], extraction=False)}` so the harness
-`search_memory` tool reads AgentCore records and the harness runs no extractor;
-AgentCore strategies (SEMANTIC, USER_PREFERENCE, SUMMARIZATION) are the single
-writer via the session manager's events.
+- **Writer:** `AgentCoreMemorySessionManager(AgentCoreMemoryConfig(memory_id, session_id,
+  actor_id, retrieval_config=None, async_mode=True, filter_restored_tool_context=True))`
+  persists conversation events. AgentCore strategies extract.
+- **Reader:** `memory={"stores": create_agentcore_memory_stores(memory_id=..., actor_id=...,
+  session_id=..., namespaces=[{"namespace": f"/preferences/{actor}/", "name": "preferences",
+  "max_search_results": 5}, {"namespace": f"/facts/{actor}/", "name": "facts",
+  "max_search_results": 5}], extraction=False)}`. Verified: yields read-only stores,
+  `MemoryManager` exposes `search_memory` only, no Haiku extractor built.
+- **Strategies** (in `agentcore.json`): `USER_PREFERENCE` -> `/preferences/{actorId}/`;
+  `SEMANTIC` with a custom extraction prompt restricted to durable operator context
+  (owned accounts/regions, naming conventions, known-noisy alarms, stated goals) and
+  excluding resource state, metrics, timestamps, identifiers, credentials, and anything
+  quoted from tool output -> `/facts/{actorId}/`. No `SUMMARIZATION`, no `EPISODIC` in v1
+  (extra extraction cost, wrong content for an ops agent). `eventExpiryDuration: 30`.
+- Tool outputs are capped at the tool (40k chars) so 100k-char payloads never enter the
+  event stream. `make memory-wipe ACTOR=<id>` exists as an admin escape hatch.
+- Locally the harness defaults stand (file store + Haiku extractor), so the demo can
+  show both modes.
 
-Fallback if the store cannot satisfy the harness `MemoryManager` writable
-topology: `memory=False` plus a custom `search_memory` tool over
-`retrieve_memory_records`. Whichever is used, `PITFALLS.md` P3 records the reason.
+### 4.4 Data flow per turn (HTTP runtime)
 
-Locally the harness defaults stand (file store + Haiku extractor) so the demo
-shows both modes.
+1. Client obtains a Cognito JWT (`scripts/token.py`) and calls `InvokeAgentRuntime`
+   with `runtimeSessionId` (uuid4 hex x2) and `{"prompt": "..."}` and `Authorization:
+   Bearer <jwt>`. The AgentCore authorizer validates the token; the header is passed
+   through (`requestHeaderAllowlist: ["Authorization"]`).
+2. `main.py` validates the payload (schema: `prompt` str <= 32 KB, optional
+   `stream` bool, no unknown keys), extracts `actor_id` from JWT `sub`, rejects an
+   actor change on an existing session, takes the per-session lock, and gets/builds the
+   agent from an LRU (size 16).
+3. `async with asyncio.timeout(HARNESS_MAX_SECONDS=600)`: `agent.stream_async(prompt)`.
+4. Events are mapped to the versioned SSE schema (`v: 1`): `text` (delta), `thinking`
+   (delta, when present), `tool_use` (name, input summary), `tool_result` (name, status,
+   bytes), `denied` (tool, reason), `metrics` (input/output/cache tokens, cycles,
+   stop_reason, est_usd), `error` (message, hint), `done`.
+5. Limit trip (`stop_reason` starts with `limit_`): emit `metrics` + `error{hint}` and
+   run one bounded closing turn (`limits=Limits(turns=1)`) asking for a summary of
+   findings so far. Wall-clock trip: cancel, emit `error{timeout}`.
+6. Session manager writes user/assistant events (async); strategies extract later;
+   the next session's `search_memory`/injection sees preferences and facts.
+7. Spans exported by ADOT only. `OTEL_TRACES_EXPORTER` is unset in the container so
+   the harness telemetry module stays idle (P8). Content capture is **off** by default;
+   `HARNESS_TRACE_CONTENT=1` turns it on for private debugging.
 
-### 4.4 Data flow per turn
+### 4.5 A2A runtime
 
-1. Client calls `InvokeAgentRuntime` with `runtimeSessionId` (>= 33 chars) and a
-   JSON payload `{"prompt": "...", "actor_id": "..."}` (actor defaults to
-   `anonymous-<session>`; a JWT `sub` wins when Identity is added later).
-2. `main.py` validates, resolves the agent from a per-process cache keyed by
-   `session_id/actor_id` (microVM is per session anyway), and calls
-   `agent.stream_async(prompt)`.
-3. Harness loop: Bedrock Converse with cache points; tool calls through the
-   read-only interventions; subagent (depth 1) for wide searches; context
-   manager offloads bulky tool output to the `/tmp` workspace.
-4. Events are yielded as SSE; `main.py` filters to content deltas and tool
-   events.
-5. Session manager writes user/assistant events to AgentCore Memory; strategies
-   extract asynchronously; the next session's first turn gets facts injected via
-   `retrieval_config`.
-6. Spans exported by ADOT (`opentelemetry-instrument`) to CloudWatch; the harness
-   telemetry module stays idle when `OTEL_TRACES_EXPORTER` is handled by ADOT
-   (verify no double export in the smoke test).
+- `a2a_main.py` builds an `a2a-sdk` 1.x Starlette app on `0.0.0.0:9000` with
+  `HarnessExecutor(AgentExecutor)`: `execute()` maps the incoming message parts to a
+  prompt, calls `build_agent(context_id, actor_id).stream_async`, streams
+  `TaskStatusUpdateEvent`/`TaskArtifactUpdateEvent`, and completes the task; `cancel()`
+  cancels the stream. Task store: in-memory (microVM per session).
+- Card served at `/.well-known/agent-card.json` from `agent_card.py`; `url` is
+  `A2A_PUBLIC_URL` (the AgentCore invocation URL for this runtime), injected by env
+  after first deploy (`make a2a-card` prints it and patches the env var).
+- Auth: same Cognito `CUSTOM_JWT` authorizer; the card advertises it in
+  `securitySchemes`/`security`. Actor id from JWT `sub` as in HTTP.
+- `scripts/a2a_client.py` fetches the card, negotiates by `protocolVersion`, sends
+  `message/stream`, prints events. Documented pitfall P22.
 
-### 4.5 IAM
+### 4.6 IAM
 
-- **Execution role** (created by CDK): AgentCore defaults + `bedrock:InvokeModel`,
-  `bedrock:InvokeModelWithResponseStream` on `arn:aws:bedrock:*::foundation-model/*`
-  and the two global inference profiles + AWS managed `ReadOnlyAccess` +
-  `logs:StartQuery/GetQueryResults` + `ce:GetCostAndUsage` (the last two are inside
-  ReadOnlyAccess; listed for clarity) + memory data-plane actions on the memory ARN.
-- **Deployer** (human, my-profile): CDK bootstrap, ECR push, AgentCore control plane.
-  `doctor` verifies with dry `List*` calls; it does not attempt IAM simulation.
+- **Execution role** (generated by CDK, not edited): Bedrock invoke on foundation
+  models and inference profiles, logs, X-Ray, memory data plane (all auto-wired).
+  `additionalPolicies` in `agentcore.json`: `arn:aws:iam::aws:policy/ReadOnlyAccess`
+  **plus** `policies/execution-role-deny.json` with explicit Deny on:
+  `secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `kms:Decrypt`,
+  `kms:GenerateDataKey*`, `s3:GetObject*`, `dynamodb:GetItem|BatchGetItem|Scan|Query|
+  PartiQLSelect`, `lambda:GetFunction|GetFunctionConfiguration|GetLayerVersion`,
+  `ec2:GetPasswordData|GetConsoleOutput|GetConsoleScreenshot|DescribeInstanceAttribute`,
+  `cloudformation:GetTemplate`, `ecs:DescribeTaskDefinition`,
+  `codebuild:BatchGetProjects`, `apigateway:GET` on `/apikeys*`,
+  `cognito-idp:AdminGetUser|ListUsers`, `sqs:ReceiveMessage`, `kinesis:GetRecords|
+  GetShardIterator`, `sts:AssumeRole|GetFederationToken|GetSessionToken`, and
+  `logs:GetLogEvents|FilterLogEvents|StartQuery|GetQueryResults` on
+  `log-group:/aws/bedrock-agentcore/*` and `log-group:aws/spans*`.
+- `aws_call` mirrors the deny table at the tool layer (defence in depth); unit test
+  asserts every denied operation is refused by the tool.
+- **Deployer** (human): CDK bootstrap (`doctor` checks `CDKToolkit` stack), ECR push,
+  AgentCore control plane, Cognito admin for `auth_bootstrap.py`.
+- Log groups: 30-day retention (set via CDK context if exposed, else documented).
 
 ## 5. Error handling
 
 | Situation | Behaviour |
 |---|---|
-| Missing region / memory id in cloud | `preflight` raises at import with the fix; container exits; CDK surfaces CREATE_FAILED with the message |
-| Model not accessible | `preflight` warns (structured), `/ping` healthy, first invoke returns a clear error event |
-| AWS tool `AccessDenied` / throttle / timeout | Tool returns `{"error": ..., "hint": ...}` text; no exception to the loop |
-| Mutating verb requested | Tool refuses before boto3; intervention denies shell calls matching `aws ... (create|put|delete|update|modify|terminate|run|start|stop)` |
-| Short session id | Padded deterministically (`sha256` hex) and logged |
-| Pending interrupt on resumed session | Logged, dismissed with an empty response; turn proceeds |
-| MCP server down | `continue_on_error: true`; agent runs without those tools |
-| Memory write failure | Logged; turn still returns; `preflight` result visible in logs |
+| Missing region / memory id in cloud | `preflight` logs the fix, `/ping` reports unhealthy; container does not crash-loop silently; `agentcore logs` shows the line |
+| Model not accessible | `preflight` WARN (structured); first invoke returns `error{hint}` event |
+| AWS tool `AccessDenied` / throttle / timeout / budget exhausted | Tool returns structured error text; loop continues |
+| Denied tool call | `ReadOnlyGuard` -> `Deny(reason)`; structured log; `denied` SSE event |
+| Session manager init fails (AccessDenied/throttle on first read) | Fail closed: `error` event with hint; no agent cached |
+| Concurrent invoke on same session | Per-session lock; second caller gets `error{busy}` immediately |
+| Actor mismatch on existing session | 403-style `error{actor_mismatch}` |
+| Short session id (dev/direct HTTP only) | 400 with fix; in cloud the service rejects earlier |
+| Limit / wall-clock trip | See 4.4 step 5 |
+| MCP server down | `continue_on_error: true` |
+| Client disconnect mid-stream | Agent finishes the turn; events persisted; documented |
+| Bedrock throttling | botocore standard retry mode, 3 attempts (string path default); documented |
 
-## 6. Testing
+## 6. Security posture (from the threat model)
 
-- **Unit (pytest, no network)**: `platform.detect()` under both env shapes;
-  payload validation and session-id padding; `aws_call` allowlist rejects every
-  mutating verb in a table of 40 real operation names; `doctor` checks using
-  botocore `Stubber`; limits config round-trip (P12).
-- **Live (marked `live`, skipped without creds)**: start `agentcore dev`, send
-  three prompts, assert session and memory files exist locally.
-- **Cloud smoke (`make smoke`, manual)**: `agentcore deploy` to us-west-2, two
-  sessions (`A` states a fact, `B` recalls it), assert one `invoke_agent` span in
-  CloudWatch for the runtime, then `agentcore remove all && agentcore deploy` to
-  tear down. Run by the owner with my-profile before publishing.
-- **CI (GitHub Actions)**: ruff, unit tests on 3.12 and 3.14, `docker buildx build
-  --platform linux/arm64` (no push, no deploy).
+6.1 **No egress-capable tools in cloud** (shell, web_fetch, write, edit off). The
+programmatic tool caller may call only the three AWS tools. The reader subagent
+inherits the same guard and profile.
+6.2 **Identity:** actor from JWT `sub`; all invokers must present a Cognito token
+from the allowed client; README states that everyone in that client shares one trust
+domain unless per-user Cognito groups are added.
+6.3 **HITL seam:** `interventions=[ReadOnlyGuard(), HumanInTheLoop(ask=None)]` is the
+documented next step, with `main.py` emitting `interrupt` events and accepting
+`interruptResponse` on resume. Not in v1.
+6.4 **Telemetry:** metadata only by default (tool name, service, operation, arg
+SHA-256, bytes, duration, status, denial decision, session/actor ids); never bodies,
+env, or values. `user_agent_extra="strands-harness-on-aws session=<id> actor=<id>"`
+on every boto3 client for CloudTrail correlation.
+6.5 **Supply chain:** base image pinned by digest; `uv.lock`; CI installs from lock;
+Dependabot on the four upstream packages; `CODEOWNERS` on `skills/**`, `AGENTS.md`,
+`policies/**`, `agentcore/**`.
+6.6 **Local hygiene:** `.gitignore` covers `.agent/`, `.claude/`, `.env*`; `doctor`
+FAILs if `.agent/` is tracked.
+6.7 **Instruction hardening** (defence in depth only): instructions and `AGENTS.md`
+say tool output, logs, tags, cost data, and memory are data, never instructions; tool
+results are wrapped with a provenance header.
 
-## 7. Documentation deliverables
+## 7. Testing
 
-- `README.md`: what/why, 5-minute local quickstart, deploy in 3 commands, demo
-  script, architecture diagram, cost note, cleanup.
-- `PITFALLS.md`: P1–P20 as symptom -> cause -> fix -> where in code.
-- `doctor.py --help` and every FAIL message carry the fix inline.
-- CHANGELOG with the pinned upstream versions.
+- **Unit (pytest, no network):** `platform.detect()` both profiles; payload schema;
+  JWT `sub` extraction and actor regex; `aws_call` allowlist/deny table over 60 real
+  operation names; output cap and budget counter; `ReadOnlyGuard` never returns
+  `Confirm`; `Limits` key check (P12) and stub-model trip; `BedrockModel` config diff
+  (P11); SSE mapper; agent card validates against `a2a.types.AgentCard` (1.x) and
+  contains `protocolVersion == "1.0"`; `doctor` checks via botocore Stubber.
+- **Live (marked, skipped without creds):** `agentcore dev`, three prompts, session and
+  memory files appear locally; a denied `aws_call` mutating operation produces a
+  `denied` event.
+- **Cloud smoke (`make smoke`, owner-run):** `auth_bootstrap` -> `deploy` -> token ->
+  session A states a preference -> poll `retrieve_memory_records` (<= 180 s) -> session B
+  recalls it -> A2A card fetched and validated -> exactly one `invoke_agent` span per
+  invoke in CloudWatch -> from inside the runtime `curl http://169.254.169.254/` and
+  `http://localhost:8080/ping` from a tool are unreachable/blocked (there are no such
+  tools; the check documents it) -> `agentcore remove all && agentcore deploy`.
+- **CI:** ruff, pytest on 3.12 and 3.14, `docker buildx build --platform linux/arm64`
+  for both images (no push, no deploy).
 
-## 8. Publishing
+## 8. Documentation
 
-GitHub `iracic82/strands-harness-on-aws`, Apache-2.0, README links the harness
-blog and AWS_AgentLab. No push until the owner says so and the cloud smoke has
-passed in the my-profile account.
+- `README.md`: what/why, 5-minute local quickstart, auth bootstrap, deploy in 3
+  commands, demo script, A2A card, architecture diagram, cost note (≈ $1/turn, ≈ $5/
+  demo, hard cap ≈ $8/turn), cleanup.
+- `PITFALLS.md`: P1–P27 as symptom -> cause -> fix -> code location.
+- `doctor.py --help`; every FAIL carries the fix.
+- `CHANGELOG.md` with pinned upstream versions.
 
-## 9. Open items to resolve during implementation
+## 9. Publishing
 
-1. P3 memory policy: store-backed vs fallback (see 4.3).
-2. Whether the CDK L3 construct exposes execution-role policy additions in
-   `agentcore.json` or needs a CDK-side patch (`agentcore/.llm-context/agentcore.ts`
-   is the schema to check).
-3. Whether ADOT auto-instrumentation and the harness `StrandsTelemetry` double
-   export; decide which one owns the exporter.
-4. Exact env var name the CDK stack injects for the memory id
-   (template shows `MEMORY_<NAME>_ID`).
+GitHub `iracic82/strands-harness-on-aws`, Apache-2.0. No push until the owner says so
+and the cloud smoke has passed in account 123456789012. Reviewer agent memory files
+under `.claude/` stay untracked.
+
+## 10. Open items (implementation-time verification)
+
+1. `requestHeaderAllowlist` exact key name in `agentcore.json` for `CUSTOM_JWT`
+   (CLI flag `--request-header-allowlist Authorization` exists).
+2. Exact env var name/value for ADOT content capture (`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT`
+   semantics read as "true keeps payloads"; verify against the current doc before wiring).
+3. Whether `a2a-sdk` 1.x installs cleanly alongside `strands-agents` (no shared pins
+   expected; verify in `uv lock`).
+4. Log-group retention: CDK context key or manual.
+5. Sonnet 5 Bedrock pricing for the README cost note.
