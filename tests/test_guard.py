@@ -91,6 +91,11 @@ def test_non_dict_tool_input_fails_closed():
         ("`aws ec2 terminate-instances --instance-ids i-1`", False),  # backtick command substitution
         ("true;aws ec2 terminate-instances --instance-ids i-1", False),  # semicolon chaining
         ("aws ec2 describe-instances&&aws ec2 terminate-instances --instance-ids i-1", False),  # && chaining
+        ("(aws ec2 terminate-instances --instance-ids i-1)", False),  # subshell
+        ("(aws ec2 describe-instances)", False),  # subshell around an otherwise-read command
+        ("cmd=aws\n$cmd ec2 terminate-instances --instance-ids i-1", False),  # variable indirection
+        ("aws ec2 describe-instances > out.json", False),  # redirection
+        ("{ aws ec2 terminate-instances --instance-ids i-1; }", False),  # brace group
     ],
 )
 def test_shell_read_only_verb_allowlist(cmd, expect_proceed):

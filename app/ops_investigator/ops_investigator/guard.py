@@ -26,15 +26,18 @@ READ_VERBS = frozenset({"ls", "help"})
 # Value-less aws CLI global flags: everything under --no-* (--no-paginate, --no-cli-pager, --no-sign-request,
 # --no-verify-ssl, ...) plus --debug. Any other "-"-prefixed token is assumed to take one value (--profile x).
 VALUELESS_FLAGS = frozenset({"--debug"})
-# Shell metacharacters shlex.split does not tokenize on; their presence means the command is not the single,
-# literal `aws ...` invocation this parser analyses, so refuse outright rather than parse past them.
-SHELL_METACHARS = re.compile(r"[;&|`]|\$\(")
+# Any shell grammar (chaining, substitution, subshells, variable indirection, redirection, brace groups, escapes,
+# embedded newlines) is out of scope: a `shell` call in the local profile must be exactly one plain command, so
+# any of these characters anywhere in the string is refused outright rather than enumerated as individual tricks.
+SHELL_METACHARS = re.compile(r"[;&|`$(){}<>\\\n]")
 # Reuse aws_call's deny table (secret-bearing "reads") in AWS CLI kebab-case spelling; aws_call's DENY is snake_case.
 SHELL_DENY = frozenset((svc, op.replace("_", "-")) for svc, op in DENY)
 
 
 def shell_is_read_only(command: str) -> bool:
-    """UX-level check for the local profile: every `aws <service> <verb>` in the command must be a read verb.
+    """UX-level check for the local profile: the command must be exactly one plain `aws <service> <verb>`
+    invocation, with no shell grammar at all (chaining, substitution, subshells, redirection, ...), and the
+    verb must be a read verb.
 
     IAM and aws_call's allowlist are the enforced controls; this only improves the local dev UX by refusing
     obviously-mutating aws CLI invocations before they run outside the AWS-API-level guard.
