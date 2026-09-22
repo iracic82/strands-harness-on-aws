@@ -100,6 +100,7 @@ The frame types, one example of each:
 ```json
 {"v": 1, "type": "tool_use", "name": "aws_call", "input_keys": ["operation", "service"]}
 {"v": 1, "type": "tool_result", "name": "aws_call", "status": "success", "bytes": 412}
+{"v": 1, "type": "denied", "tool": "aws_call", "reason": "DENIED: read-only: ec2:terminate_instances is not a permitted read operation"}
 {"v": 1, "type": "text", "delta": "This is account 123456789012 in us-west-2."}
 {"v": 1, "type": "thinking", "delta": "The user asked for identity first, so..."}
 {"v": 1, "type": "metrics", "input_tokens": 3184, "output_tokens": 210, "cache_read_tokens": 0, "cycles": 2, "stop_reason": "end_turn", "est_usd": 0.0126}
@@ -126,15 +127,12 @@ their values. A prompt-injected argument cannot leak through telemetry it never 
 tool's name. The name is resolved from the mapper's `toolUseId` map, because the underlying event does not
 carry one (P35).
 
-**There is no `denied` frame.** A `ReadOnlyGuard` refusal produces a `tool_use` frame, then a `tool_result`
-frame with `status=error`, plus the model's own explanation in the text stream. On the wire that is
-indistinguishable from a tool that failed for any other reason: the reason text (`DENIED: read-only: ...`)
-is in the tool result's content, and the frame reports content only as a byte count. Look for the guard's
-structured `guard.denied tool=... reason=...` line in the runtime log instead.
-
-Strands does emit a third event in between, `tool_cancel_event`, which carries the denial message, and
-`sse.EventMapper` drops it because it matches none of the mapped types. That event is where a `denied`
-frame would come from, and `scripts/invoke.py` already renders one if it ever appears.
+**`denied{tool, reason}`, not just an error `tool_result`.** A `ReadOnlyGuard` refusal produces a
+`tool_use` frame, then a `denied` frame, then the usual `tool_result` frame with `status=error`. The
+`denied` frame is sourced from the SDK's `tool_cancel_event` — the event `ToolExecutor._stream` yields
+between the intervention's `Deny` and the error `tool_result` it synthesises for the same call — mapped by
+`sse.EventMapper._map_tool_cancel`, with `reason` truncated to 300 characters and deduplicated per
+`toolUseId`. `scripts/invoke.py` renders it as `[denied] <tool>: <reason>`.
 
 **`est_usd` can be `null`.** `sse.estimate_usd` matches the model id against a small price table of
 `sonnet`, `opus`, and `haiku`. A model outside those families logs a warning and reports `null` rather

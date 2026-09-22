@@ -62,12 +62,6 @@ Initial release.
 
 ### Known limitations
 
-- **A tool denial is not a distinct SSE frame.** A `ReadOnlyGuard` refusal reaches the caller as a
-  `tool_use` frame followed by a `tool_result` frame with `status=error`, which on the wire is
-  indistinguishable from a tool that failed for any other reason. The reason text is in the tool result's
-  content, which the frame reports only as a byte count, and in the `guard.denied` log line. Strands does
-  emit a `tool_cancel_event` carrying the denial message and `sse.EventMapper` drops it; that event is the
-  natural source for a `denied` frame in 0.2. `scripts/invoke.py` already renders one if it appears.
 - **The `reader` subagent's limits are per delegation.** A delegate's budget is not counted against the
   parent's, so repeated delegation can take one turn past the parent's `Limits`. Set a billing alarm.
 - **The A2A runtime publishes one artifact at the end of a turn.** Streaming callers get status updates in
@@ -77,6 +71,9 @@ Initial release.
 
 ### Notes
 
+- **A tool denial is reported as a `denied` frame.** `ReadOnlyGuard`'s `Deny` reaches the caller as a
+  `denied{tool, reason}` SSE frame, sourced from the SDK's `tool_cancel_event`, ahead of the usual
+  `tool_result` frame with `status=error` for the same call.
 - The default model is `bedrock/global.anthropic.claude-sonnet-4-6`, not Sonnet 5. The Claude 5 family is
   entitled separately and was refused on the account this was built against. See PITFALLS P29.
 - Cost figures in the README (≈ $1 per turn, ≈ $5 per demo, ≈ $8 hard cap) are estimates and have not been
