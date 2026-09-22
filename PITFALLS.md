@@ -572,7 +572,11 @@ Pinned by `tests/test_tool_events.py` and
 worth knowing before you assume every result has a `tool_use` frame ahead of it: on the cloud profile
 `programmatic_tool_caller` runs its inner calls through `ToolExecutor._stream` itself and consumes those
 events, so the hook fires for calls whose `tool_use_stream` events never reached the runtime, and they
-reach the wire as `tool_result` frames with no preceding `tool_use` frame.
+reach the wire as `tool_result` frames with no preceding `tool_use` frame. A denial in there is reported
+the same way: `AfterToolCallEvent` carries `cancel_message`, so the recorder replays the cancel ahead of
+the result and the caller still gets `denied` then `tool_result` with `status=error`. For a call the model
+made directly the SDK streams its own `tool_cancel_event` as well, and `EventMapper` dedupes the two by
+`toolUseId`, so that path still produces exactly one `denied` frame.
 
 ---
 

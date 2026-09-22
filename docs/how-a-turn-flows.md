@@ -138,7 +138,9 @@ frame, then a `denied` frame, then a `tool_result` frame with `status=error` for
 between the intervention's `Deny` and the error `ToolResult` it synthesises — mapped by
 `sse.EventMapper._map_tool_cancel`, with `reason` truncated to 300 characters and deduplicated per
 `toolUseId`. `scripts/invoke.py` renders it as `[denied] <tool>: <reason>`. A successful call has no
-`denied` frame in between: it is `tool_use`, then `tool_result` with `status=success`.
+`denied` frame in between: it is `tool_use`, then `tool_result` with `status=success`. A denial inside
+`programmatic_tool_caller` has no streamed cancel event to map, so the after-tool hook carries that one
+too, and it reaches the caller as the same pair of frames.
 
 **`est_usd` can be `null`.** `sse.estimate_usd` matches the model id against a small price table of
 `sonnet`, `opus`, and `haiku`. A model outside those families logs a warning and reports `null` rather

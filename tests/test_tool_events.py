@@ -9,8 +9,9 @@ def _event(
     *,
     tool_use: object = None,
     result: object = None,
+    cancel_message: str | None = None,
 ) -> AfterToolCallEvent:
-    """A real `AfterToolCallEvent`; only `tool_use` and `result` matter to the recorder."""
+    """A real `AfterToolCallEvent`; only `tool_use`, `result` and `cancel_message` matter to the recorder."""
     return AfterToolCallEvent(
         agent=None,
         selected_tool=None,
@@ -19,6 +20,7 @@ def _event(
         result=result
         if result is not None
         else {"toolUseId": "t1", "status": "success", "content": [{"text": "x" * 10}]},
+        cancel_message=cancel_message,
     )
 
 
@@ -90,6 +92,35 @@ def test_only_the_name_status_and_a_byte_count_reach_the_wire():
         "bytes": len(secret),
     }
     assert secret not in str(frame)
+
+
+def test_a_denial_is_recorded_as_a_cancel_ahead_of_its_result():
+    """`ToolExecutor._stream` sets `cancel_message` and synthesises an error result for an intervention's
+    `Deny`. Recording the cancel first is what puts `denied` ahead of `tool_result` on the wire."""
+    recorder = ToolResultRecorder()
+    _fire(
+        recorder,
+        _event(
+            result={"toolUseId": "t1", "status": "error", "content": [{"text": "DENIED: x"}]},
+            cancel_message="DENIED: x",
+        ),
+    )
+    drained = recorder.drain()
+    assert len(drained) == 2 and "tool_cancel_event" in drained[0] and drained[1]["type"] == "tool_result"
+    assert drained[0] == {
+        "tool_cancel_event": {
+            "tool_use": {"toolUseId": "t1", "name": "aws_call", "input": {}},
+            "message": "DENIED: x",
+        }
+    }
+    assert drained[1]["tool_result"]["status"] == "error"
+
+
+def test_an_allowed_call_records_no_cancel():
+    recorder = ToolResultRecorder()
+    _fire(recorder, _event())
+    drained = recorder.drain()
+    assert len(drained) == 1 and drained[0]["type"] == "tool_result"
 
 
 def test_a_call_the_mapper_never_saw_is_still_named():

@@ -143,17 +143,25 @@ async def test_invoke_uses_one_event_mapper_per_turn(monkeypatch):
 # callback event in strands 1.56, so a real `stream_async` never yields one (P51). ---
 
 
-def _finished(tool_use_id: str = "t1", name: str = "aws_call", status: str = "success", text: str = "hello"):
+def _finished(
+    tool_use_id: str = "t1",
+    name: str = "aws_call",
+    status: str = "success",
+    text: str = "hello",
+    cancel: str | None = None,
+):
     return AfterToolCallEvent(
         agent=None,
         selected_tool=None,
         tool_use={"toolUseId": tool_use_id, "name": name},
         invocation_state={},
         result={"toolUseId": tool_use_id, "status": status, "content": [{"text": text}]},
+        cancel_message=cancel,
     )
 
 
 FIRE = object()  # a marker in RecordingAgent's event list: "the tool finished here"
+DENIAL = "DENIED: read-only: ec2:terminate_instances is not a permitted read operation"
 
 
 class RecordingAgent(FakeAgent):
@@ -201,6 +209,35 @@ async def test_invoke_emits_a_tool_result_recorded_after_the_last_stream_event(m
     frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
     assert [f["type"] for f in frames] == ["tool_result", "metrics", "done"]
     assert frames[0]["status"] == "error" and frames[0]["name"] == "aws_call"
+
+
+async def test_a_direct_denial_yields_exactly_one_denied_frame(monkeypatch):
+    """The SDK streams its own `tool_cancel_event` for a call the model made directly, and the hook
+    replays the same denial. `EventMapper._denied` dedupes them by toolUseId, so the caller sees one."""
+    tool_use = {"toolUseId": "t1", "name": "aws_call", "input": '{"service": "ec2"}'}
+    events = [
+        {"type": "tool_use_stream", "current_tool_use": tool_use},
+        {"tool_cancel_event": {"tool_use": {"toolUseId": "t1", "name": "aws_call"}, "message": DENIAL}},
+        FIRE,
+        {"result": _result()},
+    ]
+    denied = _finished(status="error", text=DENIAL, cancel=DENIAL)
+    _use(monkeypatch, RecordingAgent(events, denied))
+    frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
+    assert [f["type"] for f in frames] == ["tool_use", "denied", "tool_result", "metrics", "done"]
+    assert frames[1] == {"v": 1, "type": "denied", "tool": "aws_call", "reason": DENIAL}
+    assert frames[2]["status"] == "error" and frames[2]["name"] == "aws_call"
+
+
+async def test_a_denial_inside_the_programmatic_tool_caller_still_yields_a_denied_frame(monkeypatch):
+    """`programmatic_tool_caller` consumes its inner events, so no `tool_cancel_event` and no
+    `tool_use_stream` reach the runtime. The hook is the only source for both frames (P51)."""
+    inner = _finished(tool_use_id="tooluse_aws_call_123456789", status="error", text=DENIAL, cancel=DENIAL)
+    _use(monkeypatch, RecordingAgent([FIRE, {"result": _result()}], inner))
+    frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
+    assert [f["type"] for f in frames] == ["denied", "tool_result", "metrics", "done"]
+    assert frames[0] == {"v": 1, "type": "denied", "tool": "aws_call", "reason": DENIAL}
+    assert frames[1]["status"] == "error" and frames[1]["name"] == "aws_call"
 
 
 async def test_a_turn_discards_tool_results_left_behind_by_an_abandoned_turn():

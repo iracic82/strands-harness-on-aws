@@ -23,10 +23,11 @@ RECORDER_ATTR = "_ops_tool_recorder"
 
 
 class ToolResultRecorder(HookProvider):
-    """Records completed tool calls so the runtime can emit `tool_result` frames.
+    """Records completed tool calls so the runtime can emit `tool_result` frames, and denied ones so it
+    can emit `denied` frames for calls the SDK's own cancel event never reaches.
 
-    Nothing here reaches the wire except what `sse.EventMapper._map_tool_result` keeps: the tool
-    name, the status, and a byte count. The tool body is held only until the next drain (spec 6.4).
+    Nothing here reaches the wire except what `sse.EventMapper` keeps: the tool name, the status, a byte
+    count, and a denial's reason. The tool body is held only until the next drain (spec 6.4).
     """
 
     def __init__(self) -> None:
@@ -39,6 +40,12 @@ class ToolResultRecorder(HookProvider):
         """Cannot raise on an odd payload shape: a hook that throws takes the tool loop down with it."""
         tool_use = event.tool_use if isinstance(event.tool_use, dict) else {}
         result = event.result if isinstance(event.result, dict) else {}
+        if event.cancel_message is not None:
+            # An intervention denied the call. The SDK yields its own `ToolCancelEvent` for a call the
+            # model made directly, and `EventMapper` dedupes the two by `toolUseId` — but not for a call
+            # made inside `programmatic_tool_caller`, whose events never leave it. Replaying it here is
+            # what makes a denial in there reach the wire as `denied` then `tool_result`, like any other.
+            self._pending.append({"tool_cancel_event": {"tool_use": tool_use, "message": str(event.cancel_message)}})
         self._pending.append(
             {
                 "type": "tool_result",
