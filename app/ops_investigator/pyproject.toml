@@ -15,6 +15,7 @@ dependencies = [
   "aws-opentelemetry-distro~=0.18.0",
   "boto3>=1.43",
   "jmespath>=1.0",
+  "async-timeout>=4; python_version < '3.11'",  # asyncio.timeout landed in 3.11; the floor is 3.10
 ]
 
 [tool.hatch.build.targets.wheel]
