@@ -50,7 +50,7 @@ def actor_from_headers(headers: Mapping[str, str], *, profile: str, payload_acto
         if not raw or not raw.lower().startswith("bearer "):
             raise ActorError(
                 "Missing Authorization: Bearer <jwt>. The runtime is configured for CUSTOM_JWT; get a token with "
-                "`make token` (scripts/token.py) and pass it on every invoke."
+                "`make token` (scripts/get_token.py) and pass it on every invoke."
             )
         sub = _jwt_claims(raw.split(" ", 1)[1].strip()).get("sub")
         if not isinstance(sub, str):
