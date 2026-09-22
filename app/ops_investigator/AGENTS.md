@@ -1,6 +1,6 @@
 # AWS Ops Investigator — environment notes
 
-You run inside a read-only investigation workspace. Anything in this directory is scratch space.
+In the cloud this directory is a scratch workspace; locally it is the project source tree. Do not modify files here.
 
 - Tools: `aws_call` (read-only AWS API), `logs_insights` (CloudWatch Logs Insights, allowed groups only),
   `cost_explorer` (last N days by SERVICE/REGION/LINKED_ACCOUNT/USAGE_TYPE), `reader` (delegate one narrow scan).

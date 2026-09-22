@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from ops_investigator import agent as mod
 from ops_investigator import platform
 from ops_investigator.guard import ReadOnlyGuard
+from ops_investigator.prompts import LOCAL_TOOLS_NOTE, OPS_INSTRUCTIONS
 from strands.types.agent import Limits
 
 
@@ -40,10 +42,10 @@ def test_cloud_builtin_tools_pinned(cloud_env):
         assert name not in bt or bt[name] is False
 
 
-def test_local_builtin_tools_drop_subagent_and_web_search():
+def test_local_builtin_tools_drop_subagent_web_search_write_edit():
     rt = platform.detect("s" * 33, "igor")
     bt = platform.builtin_tools(rt)
-    assert bt == {"subagent": False, "web_search": False}
+    assert bt == {"subagent": False, "web_search": False, "write": False, "edit": False}
 
 
 def test_cloud_session_and_memory_options(cloud_env, monkeypatch, tmp_path):
@@ -56,7 +58,7 @@ def test_cloud_session_and_memory_options(cloud_env, monkeypatch, tmp_path):
     assert cfg.async_mode is True and cfg.retrieval_config is None and cfg.filter_restored_tool_context is True
     mem = platform.memory_option(rt)
     assert set(mem) == {"stores"} and len(mem["stores"]) == 2
-    assert all(getattr(s, "writable", False) is False for s in mem["stores"])
+    assert all(s.writable is False for s in mem["stores"])
 
 
 def test_cloud_guard_denies_dangerous_tools(cloud_env):
@@ -74,7 +76,7 @@ def test_local_options():
     assert isinstance(platform.guard_for(rt), ReadOnlyGuard) and platform.guard_for(rt).denied_tools == frozenset()
 
 
-def test_build_agent_local_wires_tools_and_limits(monkeypatch):
+def test_build_agent_local_wires_tools_and_trace_attributes(monkeypatch):
     captured = {}
 
     def fake_create_harness(**kw):
@@ -95,20 +97,34 @@ def test_build_agent_local_wires_tools_and_limits(monkeypatch):
     assert captured["background_tasks"] == mod.BACKGROUND_TASKS
     assert isinstance(captured["interventions"][0], ReadOnlyGuard)
     assert captured["model"] == platform.DEFAULT_MODEL and captured["effort"] == "medium"
+    assert captured["instructions"].startswith(OPS_INSTRUCTIONS)
+    assert captured["skills"] == str(platform.APP_DIR / "skills")
+    assert captured["builtin_tools"] == {"subagent": False, "web_search": False, "write": False, "edit": False}
+    assert captured["caching"] == "auto"
 
 
-def test_reader_stream_async_is_capped(monkeypatch):
-    seen = {}
+def test_build_agent_local_appends_the_local_tools_note(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(mod, "create_harness", lambda **kw: captured.update(kw))
+    mod.build_agent("s" * 33, "igor", env={})
+    assert captured["instructions"] == OPS_INSTRUCTIONS + LOCAL_TOOLS_NOTE
+    assert "no `write` or `edit`" in captured["instructions"]
 
-    class FakeAgent:
-        async def stream_async(self, prompt, **kw):
-            seen.update(kw)
-            yield {"data": "ok"}
 
-    monkeypatch.setattr(mod, "create_harness", lambda **kw: FakeAgent())
+def test_build_agent_cloud_instructions_omit_the_local_tools_note(cloud_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(platform.tempfile, "gettempdir", lambda: str(tmp_path))
+    _offline_session_manager(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(mod, "create_harness", lambda **kw: captured.update(kw))
+    mod.build_agent("s" * 33, "igor")
+    assert captured["instructions"] == OPS_INSTRUCTIONS
+    assert LOCAL_TOOLS_NOTE not in captured["instructions"]
+
+
+def _reader_spec():
     from strands_harness.tools import AgentSpec
 
-    spec = AgentSpec(
+    return AgentSpec(
         task="q",
         agent_type="reader",
         instructions="x",
@@ -118,7 +134,24 @@ def test_reader_stream_async_is_capped(monkeypatch):
         context="none",
         last_messages=None,
     )
-    child = mod.build_reader(spec)
+
+
+def test_reader_stream_async_is_capped(monkeypatch):
+    seen = {}
+    captured = {}
+
+    class FakeAgent:
+        async def stream_async(self, prompt, **kw):
+            seen.update(kw)
+            yield {"data": "ok"}
+
+    def fake_create_harness(**kw):
+        captured.update(kw)
+        return FakeAgent()
+
+    monkeypatch.setattr(mod, "create_harness", fake_create_harness)
+    rt = platform.detect("s" * 33, "igor")
+    child = mod.build_reader(_reader_spec(), rt=rt)
 
     async def run():
         async for _ in child.stream_async("q"):
@@ -126,8 +159,41 @@ def test_reader_stream_async_is_capped(monkeypatch):
 
     asyncio.run(run())
     assert seen["limits"] == mod.READER_LIMITS
+    assert captured["effort"] == "low"
+    assert captured["session"] is False and captured["memory"] is False and captured["skills"] is False
+    assert captured["builtin_tools"] == {"*": False, "read": True}
+    assert captured["trace_attributes"]["agent.role"] == "reader"
+    assert isinstance(captured["interventions"][0], ReadOnlyGuard)
 
 
-def test_reader_tool_is_named_reader():
-    tool = mod.make_reader_tool()
+def test_reader_caller_supplied_limits_win(monkeypatch):
+    seen = {}
+
+    class FakeAgent:
+        async def stream_async(self, prompt, **kw):
+            seen.update(kw)
+            yield {"data": "ok"}
+
+    monkeypatch.setattr(mod, "create_harness", lambda **kw: FakeAgent())
+    rt = platform.detect("s" * 33, "igor")
+    child = mod.build_reader(_reader_spec(), rt=rt)
+
+    async def run():
+        async for _ in child.stream_async("q", limits=mod.LIMITS):
+            pass
+
+    asyncio.run(run())
+    assert seen["limits"] == mod.LIMITS
+
+
+def test_build_reader_without_a_runtime_fails_closed(monkeypatch):
+    monkeypatch.setattr(mod, "_current", {})
+    with pytest.raises(RuntimeError, match="requires a Runtime"):
+        mod.build_reader(_reader_spec())
+
+
+def test_reader_tool_is_named_reader_with_no_open_tools_param():
+    rt = platform.detect("s" * 33, "igor")
+    tool = mod.make_reader_tool(rt)
     assert getattr(tool, "tool_name", getattr(tool, "name", "")) == "reader"
+    assert "tools" not in tool.tool_spec["inputSchema"]["json"]["properties"]

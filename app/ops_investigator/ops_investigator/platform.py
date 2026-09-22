@@ -102,7 +102,8 @@ def builtin_tools(rt: Runtime) -> dict[str, Any]:
                 "timeout": 60,
             },
         }
-    return {"subagent": False, "web_search": False}  # local keeps shell/file/web_fetch for exploration
+    # Local keeps shell (the guard vets it) and read/web_fetch for exploration; write and edit have no read-only use.
+    return {"subagent": False, "web_search": False, "write": False, "edit": False}
 
 
 def guard_for(rt: Runtime) -> ReadOnlyGuard:
