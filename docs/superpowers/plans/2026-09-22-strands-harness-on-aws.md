@@ -6,13 +6,13 @@
 
 **Architecture:** One `build_agent()` factory wraps `create_harness()`; `platform.py` switches sessions/memory/skills/tool profile by env (`local` vs `cloud`). Two thin entrypoints (`main.py` for AgentCore HTTP/SSE, `a2a_main.py` for A2A 1.0) share it. A deterministic `ReadOnlyGuard` intervention plus a (service, operation) allowlist in the AWS tools plus an IAM deny block make the agent read-only in three layers. Deployment is an arm64 container via the npm `@aws/agentcore` CLI (CDK) driven by `agentcore.json`.
 
-**Tech Stack:** Python 3.12 (image) / 3.10+ (supported); `strands-harness==0.1.1`, `strands-agents==1.56.0`, `bedrock-agentcore==1.23.1`, `a2a-sdk[http-server]>=1.1,<2`, `boto3`, `aws-opentelemetry-distro~=0.18.0`; `uv`; `pytest` + `botocore.stub.Stubber`; `ruff`; npm `@aws/agentcore@0.30.x`; Docker buildx (arm64); AWS account 123456789012 / profile `my-profile` / region `us-west-2` for the owner's smoke test.
+**Tech Stack:** Python 3.12 (image) / 3.10+ (supported); `strands-harness==0.1.1`, `strands-agents==1.56.0`, `bedrock-agentcore==1.23.1`, `a2a-sdk[http-server]>=1.1,<2`, `boto3`, `aws-opentelemetry-distro~=0.18.0`; `uv`; `pytest` + `botocore.stub.Stubber`; `ruff`; npm `@aws/agentcore@0.30.x`; Docker buildx (arm64); AWS account 123456789012 / profile `<your-profile>` / region `us-west-2` for the owner's smoke test.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-strands-harness-on-aws-design.md` (v2). Read it first; task rationale and the pitfall numbers (P1–P27) come from it.
 
 ## Global Constraints
 
-- Repo root is `/home/you/PycharmProjects/Strands` (git initialised, branch `main`). Commit messages: plain, no `Co-Authored-By`, no "Generated with" lines. Author: `Igor Racic <you@example.com>`.
+- Repo root is `<repo-root>` (git initialised, branch `main`). Commit messages: plain, no `Co-Authored-By`, no "Generated with" lines. Author: `<your git identity>`.
 - Python `>=3.10`; the container image uses `python:3.12-slim` pinned by digest; `agentcore.json` `runtimeVersion` is `PYTHON_3_12`.
 - Dependency pins: `strands-harness==0.1.1`, `strands-agents[otel]==1.56.0`, `bedrock-agentcore==1.23.1`, `a2a-sdk[http-server]>=1.1,<2`, `aws-opentelemetry-distro~=0.18.0`, `boto3>=1.43`. `uv.lock` is committed; CI installs from the lock.
 - Default model string `bedrock/global.anthropic.claude-sonnet-5`; default effort `medium`; reader effort `low`. Env overrides: `HARNESS_MODEL`, `HARNESS_EFFORT`.
@@ -2358,7 +2358,7 @@ async def go():
     print(r)
 asyncio.run(go())"
 ```
-Expected: a task with an `answer` artifact (the local profile calls Bedrock; ensure `AWS_PROFILE=my-profile AWS_REGION=us-west-2`).
+Expected: a task with an `answer` artifact (the local profile calls Bedrock; ensure `AWS_PROFILE=<your-profile> AWS_REGION=us-west-2`).
 
 - [ ] **Step 7: Commit** → `git add -A && git commit -m "feat: A2A 1.0 runtime with hand-built agent card"`
 
@@ -2617,7 +2617,7 @@ if __name__ == "__main__":
 ```
 
 - [ ] **Step 3: Run** → `uv run pytest tests/test_doctor.py -v` → pass. Then a real run against the owner's account:
-`AWS_PROFILE=my-profile uv run python doctor.py --region us-west-2` → expect PASS on credentials, agentcore_region, transaction_search, models; WARN on cdk_bootstrap (stack missing as of 2026-09-22); FAIL on agentcore_cli if the old Python toolkit is still first on PATH (fix locally: `pip uninstall bedrock-agentcore-starter-toolkit` or reorder PATH).
+`AWS_PROFILE=<your-profile> uv run python doctor.py --region us-west-2` → expect PASS on credentials, agentcore_region, transaction_search, models; WARN on cdk_bootstrap (stack missing as of 2026-09-22); FAIL on agentcore_cli if the old Python toolkit is still first on PATH (fix locally: `pip uninstall bedrock-agentcore-starter-toolkit` or reorder PATH).
 
 - [ ] **Step 4: Makefile `doctor` target and commit**
 
@@ -2643,9 +2643,9 @@ doctor:
 ```bash
 cd /tmp && rm -rf ac-scaffold && npx -y @aws/agentcore@0.30.0 create --name OpsInvestigator --project-name harnessaws \
   --framework Strands --model-provider Bedrock --memory longAndShortTerm --build Container --language Python --protocol HTTP
-cp -R /tmp/ac-scaffold/harnessaws/agentcore /home/you/PycharmProjects/Strands/agentcore 2>/dev/null || cp -R /tmp/harnessaws/agentcore /home/you/PycharmProjects/Strands/agentcore
-cp /tmp/harnessaws/app/OpsInvestigator/.dockerignore /home/you/PycharmProjects/Strands/app/ops_investigator/.dockerignore
-cp /tmp/harnessaws/AGENTS.md /home/you/PycharmProjects/Strands/docs/agentcore-cli-AGENTS.md   # reference for readers
+cp -R /tmp/ac-scaffold/harnessaws/agentcore <repo-root>/agentcore 2>/dev/null || cp -R /tmp/harnessaws/agentcore <repo-root>/agentcore
+cp /tmp/harnessaws/app/OpsInvestigator/.dockerignore <repo-root>/app/ops_investigator/.dockerignore
+cp /tmp/harnessaws/AGENTS.md <repo-root>/docs/agentcore-cli-AGENTS.md   # reference for readers
 ```
 Do not copy the scaffold's `app/` (we have our own) and do not edit anything under `agentcore/cdk/`.
 
@@ -3215,7 +3215,7 @@ def test_three_prompts_and_local_state(server):
     assert any((ROOT / "app/ops_investigator/.agent/sessions").rglob("*"))
 ```
 
-- [ ] **Step 9: Run the live test with the owner's profile** → `AWS_PROFILE=my-profile AWS_REGION=us-west-2 uv run pytest -m live tests/live -v` → pass (this calls Bedrock and costs cents).
+- [ ] **Step 9: Run the live test with the owner's profile** → `AWS_PROFILE=<your-profile> AWS_REGION=us-west-2 uv run pytest -m live tests/live -v` → pass (this calls Bedrock and costs cents).
 
 - [ ] **Step 10: Commit** → `git add -A && git commit -m "feat: auth bootstrap, token, invoke, A2A client, memory wipe, demo, and live test"`
 
@@ -3354,7 +3354,7 @@ sleep 8; aws logs get-query-results --region "$REGION" --query-id "$(python3 -c 
 echo "== teardown? run: make destroy   (kept up for the demo by default)"
 ```
 
-- [ ] **Step 2: Run it** (owner, `AWS_PROFILE=my-profile`), watch `make logs` for the `preflight` lines and any `guard.denied`. Record in PITFALLS: which token (ID vs access) the authorizer accepted; whether boto3's `invoke_agent_runtime` works with a JWT runtime or the `httpx` path was needed; whether `requestHeaderAllowlist` delivered `Authorization` to `context.request_headers`; the exact CloudWatch span count. Resolve spec section 10 items and commit.
+- [ ] **Step 2: Run it** (owner, `AWS_PROFILE=<your-profile>`), watch `make logs` for the `preflight` lines and any `guard.denied`. Record in PITFALLS: which token (ID vs access) the authorizer accepted; whether boto3's `invoke_agent_runtime` works with a JWT runtime or the `httpx` path was needed; whether `requestHeaderAllowlist` delivered `Authorization` to `context.request_headers`; the exact CloudWatch span count. Resolve spec section 10 items and commit.
 
 - [ ] **Step 3: Teardown check** → `make destroy` once, confirm `agentcore status` shows nothing, redeploy for the live demo if wanted.
 
@@ -3467,7 +3467,7 @@ def test_readme_has_no_untagged_cloud_commands():
 - Modify: `.gitignore`, `Makefile` (`setup` target, `hygiene` target), `.github/workflows/ci.yml` (gitleaks job + fresh-clone job), `README.md` (Quickstart starts with `make setup`)
 
 **Rules (binding for every task from here on):**
-- Nothing account-specific is committed: no 12-digit AWS account ids, no ARNs containing an account id, no Cognito pool/client ids, no runtime ARNs, no `/Users/<name>` paths, no profile names other than the placeholder `<your-profile>`. The owner's account `123456789012` and profile `my-profile` never appear in tracked files (docs/superpowers/ is the one exception and is excluded from the published repo via `.gitattributes export-ignore` **and** listed in the hygiene test's allowlist).
+- Nothing account-specific is committed: no 12-digit AWS account ids, no ARNs containing an account id, no Cognito pool/client ids, no runtime ARNs, no `/Users/<name>` paths, no profile names other than the placeholder `<your-profile>`. The owner's account `123456789012` and profile `<your-profile>` never appear in tracked files (docs/superpowers/ is the one exception and is excluded from the published repo via `.gitattributes export-ignore` **and** listed in the hygiene test's allowlist).
 - `agentcore/aws-targets.json`, `agentcore/.cli/`, `agentcore/.env.local`, `.env`, `.agent/` are git-ignored. `agentcore/aws-targets.example.json` is committed with `"account": "123456789012"`.
 - `make setup` generates what the user's environment needs: detects region (`AWS_REGION` or the profile's default), calls STS for the account id, writes `agentcore/aws-targets.json` from the example, writes `.env` from `.env.example` with the detected values, and prints the next command. Idempotent; never overwrites a file that already differs unless `--force`.
 - Placeholders in `agentcore.json` are the literal strings `REPLACED_BY_auth_bootstrap` / `REPLACED_AFTER_FIRST_DEPLOY`; `auth_bootstrap.py` and `smoke.sh` rewrite them locally and the resulting file is **not** meant to be committed back (documented; `make hygiene` fails if a real discovery URL or client id is staged).

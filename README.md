@@ -35,12 +35,15 @@ make doctor    # 14 checks; every FAIL prints the fix
 ```
 
 `make setup` is the only thing standing between a fresh clone and a working one. It calls STS for your
-account id, takes the region from `--region` / `AWS_REGION` / your profile, and writes
-`agentcore/aws-targets.json` (from the committed `aws-targets.example.json`) and `.env` (from
-`.env.example`). Both files are git-ignored, because both carry your account id, and nothing
-account-specific is committed here -- `make hygiene` is the test that keeps it that way. Setup is
+account id and writes `agentcore/aws-targets.json` (from the committed `aws-targets.example.json`) and
+`.env` (from `.env.example`). Both files are git-ignored, because both carry your account id, and nothing
+account-specific is in this repo at all -- `make hygiene` is the test that keeps it that way. Setup is
 idempotent: run it as often as you like, and a file you have edited yourself is reported and kept unless
-you pass `--force`.
+you pass `--force`. If STS cannot answer, it writes nothing and exits 2 with the credential fix.
+
+The region is `--region` if you pass one, otherwise `AWS_REGION`, otherwise `us-west-2`. `make setup`
+always passes `--region`, because the Makefile resolves it that way, so your profile's own default region
+is not consulted on that path -- run `uv run python scripts/setup.py` directly if that is what you want.
 
 `make doctor` is the whole point of the repo in one command. It checks your Python, uv, Node, and CLI, then
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,

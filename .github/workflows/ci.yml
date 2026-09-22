@@ -57,7 +57,10 @@ jobs:
       - run: uv python install "3.12"
       - name: clone the checkout and run the suite from the clone
         run: |
-          git clone --depth 1 "$GITHUB_WORKSPACE" /tmp/fresh
+          # actions/checkout leaves a detached HEAD on a pull_request, and `git clone` of a repo whose
+          # HEAD points at no branch has nothing to check out. Name the commit first.
+          git -C "$GITHUB_WORKSPACE" branch -f fresh-clone-src HEAD
+          git clone --depth 1 --branch fresh-clone-src "$GITHUB_WORKSPACE" /tmp/fresh
           cd /tmp/fresh
           uv sync --frozen --python "3.12"
           uv run pytest -q

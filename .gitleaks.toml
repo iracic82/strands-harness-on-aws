@@ -1,22 +1,17 @@
-# gitleaks configuration. `make hygiene` runs `gitleaks detect --no-banner --source .` with it, the
-# pre-commit hook runs it on staged changes, and the `secrets` CI job runs it on every push.
+# gitleaks configuration. `make hygiene` runs it twice -- once over history and once over the working
+# tree (`--no-git`) -- the pre-commit hook runs it on staged changes, and the `secrets` CI job runs it
+# on every push with full history.
 #
-# gitleaks finds credential-shaped strings. It does not know what *this* repo's local state looks
-# like -- account ids, runtime ARNs, Cognito pool ids -- so tests/test_repo_hygiene.py covers that
-# half. Neither check subsumes the other; `make hygiene` runs both.
+# There are deliberately no allowlists. Every path in this repo, including the design history under
+# docs/superpowers/, is published to whoever clones it, so every path is scanned under the same rules.
+# An allowlist here would be a place for a real finding to hide, and the one that was tempting --
+# silencing the placeholder account 123456789012 -- would have silenced any finding that merely
+# contained that digit run.
+#
+# gitleaks finds credential-shaped strings. It does not know what *this* repo's local state looks like
+# (account ids, runtime ARNs, Cognito pool ids, the owner's profile name), so tests/test_repo_hygiene.py
+# covers that half. Neither check subsumes the other; `make hygiene` runs both.
 title = "strands-harness-on-aws"
 
 [extend]
 useDefault = true
-
-[[allowlists]]
-description = "Design history, stripped from the published archive by .gitattributes export-ignore."
-paths = [
-  '''^docs/superpowers/''',
-  '''^\.superpowers/''',
-]
-
-[[allowlists]]
-description = "The documentation placeholder account id, which is not anybody's account."
-regexTarget = "match"
-regexes = ['''123456789012''']

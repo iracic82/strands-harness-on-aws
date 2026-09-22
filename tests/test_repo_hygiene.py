@@ -1,13 +1,19 @@
-"""The gate that keeps this repo cloneable: nothing account-specific is committed, and the files that
-would carry an account id are git-ignored rather than merely absent today.
+"""The gate that keeps this repo cloneable: nothing account-specific is in it, and the files that would
+carry an account id are git-ignored rather than merely absent today.
 
-`make hygiene` runs this file and then gitleaks. These two checks catch different things: gitleaks
-knows what a credential looks like, and this file knows what *this* repo's local state looks like
-(account ids, runtime ARNs, Cognito pool ids, and the placeholders `auth_bootstrap` rewrites).
+`make hygiene` runs this file and then gitleaks, twice (history and working tree). The two catch
+different things: gitleaks knows what a credential looks like, and this file knows what *this* repo's
+local state looks like -- account ids, runtime ARNs, Cognito pool ids, the owner's own profile name, and
+the placeholders `auth_bootstrap` rewrites.
 
-Only tracked files are scanned, because only tracked files get published. `docs/superpowers/` is the
-one exception: it is the design history, it names the owner's account, and it is stripped from the
-published archive by `.gitattributes export-ignore`.
+Every file git would publish is scanned, tracked or not: `git ls-files --cached --others
+--exclude-standard`. There is no allowlisted directory. `docs/superpowers/` is design history and is
+published with the rest of the repo, so it was scrubbed to the same placeholders everything else uses --
+a clone gets it, and `export-ignore` would only have hidden it from `git archive`.
+
+This gate reads the working tree, not history. A value that was committed and later removed is still in
+the object store; history was scrubbed once, before first publish, and rewriting it afterwards is the
+only way to remove one.
 """
 
 from __future__ import annotations
@@ -21,8 +27,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# A path prefix, matched against `git ls-files` output.
-ALLOW = ("docs/superpowers/",)
 # Lockfiles pin hashes and PyPI URLs that trip the 12-digit rule with nothing to fix; images are binary.
 SKIP_SUFFIXES = (".lock", ".png", ".jpg", ".gif", ".ico", ".pdf", ".woff", ".woff2")
 # The placeholder account id that documentation and the example target are allowed to use.
@@ -33,14 +37,23 @@ ACCOUNT_ID = re.compile(r"(?<!\d)\d{12}(?!\d)")
 ARN_WITH_ACCOUNT = re.compile(r"arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:")
 USER_PATH = re.compile(r"/Users/[A-Za-z0-9_.-]+/")
 # A Cognito user pool id: the region, an underscore, nine characters. No example is spelled out here,
-# because this file is tracked too, and the first thing this test caught was a sample in its own comment.
+# because this file is scanned like every other, and the first thing this test caught was a sample in
+# its own comment.
 COGNITO_ID = re.compile(r"\b[a-z]{2}-[a-z]+-\d_[A-Za-z0-9]{9}\b")
+PATTERNS = (ACCOUNT_ID, ARN_WITH_ACCOUNT, USER_PATH, COGNITO_ID)
+
+# Values no regex can recognise -- a profile name and an email address look like ordinary words. They
+# are assembled from halves on purpose: this file is scanned too, and spelling them out here would be
+# the leak. Adding one costs nothing; leaving one out means nothing catches it.
+FORBIDDEN_LITERALS = tuple(
+    "".join(parts) for parts in (("okta", "-sso"), ("/Users/", "iracic"), ("iracic82", "@gmail.com"))
+)
 
 PLACEHOLDER = "REPLACED_BY_auth_bootstrap"
 PUBLIC_URL_PLACEHOLDER = "REPLACED_AFTER_FIRST_DEPLOY"
 
 # A source archive (`git archive`, or GitHub's "Download ZIP") has no git metadata, so there is
-# nothing to scan and nothing anyone could commit from it. In every checkout, including CI, it runs.
+# nothing to list and nothing anyone could commit from it. In every checkout, including CI, it runs.
 pytestmark = pytest.mark.skipif(not (ROOT / ".git").exists(), reason="not a git checkout")
 
 
@@ -48,29 +61,31 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
 
 
-def _tracked() -> list[str]:
-    return [
-        path
-        for path in _git("ls-files").splitlines()
-        if path and not path.startswith(ALLOW) and not path.endswith(SKIP_SUFFIXES)
-    ]
+def _publishable() -> list[str]:
+    """Every file `git add -A` would stage: tracked, plus untracked that is not ignored.
+
+    Tracked-only would be a gate with a blind spot exactly where new work lands -- a file is invisible
+    to it until the moment it is too late to matter.
+    """
+    listed = _git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
+    return sorted({path for path in listed if path and not path.endswith(SKIP_SUFFIXES)})
 
 
 def _is_placeholder(match: str) -> bool:
     return EXAMPLE_ACCOUNT in match or "<your" in match
 
 
-def test_no_account_specific_values_committed():
+def test_no_account_specific_values_are_in_the_working_tree():
     bad = []
-    for rel in _tracked():
+    for rel in _publishable():
         path = ROOT / rel
         try:
             text = path.read_text()
         except (UnicodeDecodeError, OSError):
             continue  # binary, or a symlink to somewhere that does not exist in this checkout
-        for rx in (ARN_WITH_ACCOUNT, USER_PATH, COGNITO_ID):
+        for rx in PATTERNS:
             bad += [f"{rel}: {m.group(0)}" for m in rx.finditer(text) if not _is_placeholder(m.group(0))]
-        bad += [f"{rel}: account id {m.group(0)}" for m in ACCOUNT_ID.finditer(text) if not _is_placeholder(m.group(0))]
+        bad += [f"{rel}: forbidden literal {literal}" for literal in FORBIDDEN_LITERALS if literal in text]
     assert bad == [], "\n".join(bad)
 
 
@@ -114,3 +129,50 @@ def test_agentcore_json_has_only_placeholders():
             assert env["COGNITO_DISCOVERY_URL"] == PLACEHOLDER, name
         if "A2A_PUBLIC_URL" in env:
             assert env["A2A_PUBLIC_URL"] == PUBLIC_URL_PLACEHOLDER, name
+
+
+# --- the patterns themselves ------------------------------------------------------------------------
+# A scanner that matches nothing passes every scan. These samples are assembled rather than written
+# out, for the same reason the literals above are: this file is scanned too.
+
+OTHER_ACCOUNT = EXAMPLE_ACCOUNT[:-1] + "3"  # 12 digits, and not the allowed placeholder
+SAMPLE_POOL = "us-west-2" + "_" + "Ab1Cd2Ef3"
+SAMPLE_HOME = "/Users/" + "somebody/code"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "sample"),
+    [
+        (ACCOUNT_ID, OTHER_ACCOUNT),
+        (ACCOUNT_ID, f"the account is {OTHER_ACCOUNT}."),
+        (ARN_WITH_ACCOUNT, f"arn:aws:iam::{OTHER_ACCOUNT}:role/Admin"),
+        (ARN_WITH_ACCOUNT, f"arn:aws:bedrock-agentcore:us-west-2:{OTHER_ACCOUNT}:runtime/Ops-abc"),
+        (USER_PATH, SAMPLE_HOME),
+        (COGNITO_ID, SAMPLE_POOL),
+        (COGNITO_ID, f"https://cognito-idp.us-west-2.amazonaws.com/{SAMPLE_POOL}/.well-known/openid-configuration"),
+    ],
+)
+def test_the_patterns_catch_what_they_are_for(pattern, sample):
+    assert pattern.search(sample)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "sample"),
+    [
+        (ACCOUNT_ID, "1234567890123456"),  # a 16-digit run is a card number or a hash, not an account
+        (ACCOUNT_ID, "12345678901"),  # eleven digits
+        (ACCOUNT_ID, "1.2345678901234"),  # thirteen digits with a dot in front
+        (USER_PATH, "/usr/local/bin/"),
+        (USER_PATH, "/Users/<name>/"),  # the placeholder form the docs use
+        (COGNITO_ID, "us-west-2"),  # a bare region is not a pool id
+        (ARN_WITH_ACCOUNT, "arn:aws:iam::aws:policy/ReadOnlyAccess"),  # an AWS-managed policy has no account
+    ],
+)
+def test_the_patterns_leave_lookalikes_alone(pattern, sample):
+    assert not pattern.search(sample)
+
+
+def test_the_placeholder_account_is_allowed_and_a_real_one_is_not():
+    assert _is_placeholder(EXAMPLE_ACCOUNT)
+    assert _is_placeholder("<your-profile>")
+    assert not _is_placeholder(OTHER_ACCOUNT)

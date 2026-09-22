@@ -39,14 +39,16 @@ Initial release.
   clone needs), `invoke.py` (three transports, SSE rendering), `get_token.py`, `a2a_client.py`,
   `memory_wipe.py`, `demo.sh` (the two-session memory demo), and `smoke.sh` (the full owner-run
   end-to-end check).
-- **A public-repo hygiene gate**: `make hygiene` fails on an account id, an ARN, a Cognito pool id, or a
-  `/Users/` path in any tracked file, and on a generated file that is tracked rather than ignored.
-  gitleaks runs beside it, in CI and as a pre-commit hook, and a `fresh-clone` CI job proves the clone
-  runs with nothing but the repo.
+- **A public-repo hygiene gate**: `make hygiene` fails on an account id, an ARN, a Cognito pool id, a
+  `/Users/` path, or the owner's own profile name in anything git would publish -- tracked files *and*
+  untracked ones that are not ignored -- and on a generated file that is tracked rather than ignored.
+  gitleaks runs beside it over both history and the working tree, in CI and as a pre-commit hook, and a
+  `fresh-clone` CI job proves the clone runs with nothing but the repo. There is no allowlisted path:
+  the design history under `docs/superpowers/` uses the same placeholders as everything else.
 - **Two arm64 images** built by the generated CDK stack on a native ARM CodeBuild host, from a
   digest-pinned base.
-- **CI** on Python 3.12 and 3.14: ruff, pytest, and an arm64 buildx build of both images. 265 tests, no
-  network.
+- **CI** on Python 3.12 and 3.14: ruff, pytest, gitleaks, an arm64 buildx build of both images, and a
+  fresh-clone run of the whole suite. 317 tests, no network.
 - **Documentation**: `README.md`, `PITFALLS.md` (50 entries), and a five-part learning path under `docs/`.
 
 ### Pinned versions

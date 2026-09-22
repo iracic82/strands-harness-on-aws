@@ -12,8 +12,12 @@ whole reason this script exists instead of a `cp` line in the README.
 Nothing is clobbered: a generated file that already exists and already matches is left alone, and one
 that differs is reported and kept until you pass `--force`. Run it as often as you like.
 
-The region is not validated here. `make doctor` checks it against the list of regions AgentCore
-actually runs in, and this script prints `next: make doctor` for exactly that reason.
+Exit code 0, or 2 when STS cannot be reached -- no credentials, an expired SSO session, an unknown
+profile. Nothing is written in that case, so a failed run leaves no half-configured repo behind.
+
+The region is `--region`, else `AWS_REGION`, else the profile's own default, else `us-west-2`. It is not
+validated here: `make doctor` checks it against the regions AgentCore actually runs in, which is why
+this script ends by printing `next: make doctor`.
 
 `--reset-placeholders` delegates to `auth_bootstrap.reset_placeholders`, which owns the placeholder
 spellings. It lives here too because `setup.py` is the command people remember.
@@ -24,9 +28,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
 try:  # `python scripts/setup.py` puts scripts/ on sys.path; importing it as `scripts.setup` does not.
     from scripts import auth_bootstrap
@@ -41,6 +47,7 @@ ENV_EXAMPLE = ROOT / ".env.example"
 DEFAULT_REGION = "us-west-2"
 # The example's own description explains how to copy it, which reads wrong in the generated file.
 TARGET_DESCRIPTION = "Written by scripts/setup.py (make setup). Never committed: it carries the AWS account id."
+CREDENTIALS_FIX = "fix: export AWS_PROFILE=<your-profile>; aws sso login --profile <your-profile>"
 
 
 def detect_region(explicit: str | None) -> str:
@@ -97,11 +104,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     region = detect_region(args.region)
-    identity = boto3.client("sts", region_name=region).get_caller_identity()
-    account = identity["Account"]
+    # Nothing is written before STS answers. Half-written setup is worse than none: an aws-targets.json
+    # with no account in it deploys somewhere nobody meant, and the error it gives is about CDK.
+    try:
+        identity = boto3.client("sts", region_name=region).get_caller_identity()
+    except (BotoCoreError, ClientError, NoCredentialsError) as exc:
+        print(f"cannot reach STS in {region}: {exc}", file=sys.stderr)
+        print(CREDENTIALS_FIX, file=sys.stderr)
+        return 2
+    account = identity.get("Account")
+    if not account:
+        print(f"STS answered without an account id: {identity}", file=sys.stderr)
+        print(CREDENTIALS_FIX, file=sys.stderr)
+        return 2
+
     print(f"agentcore/aws-targets.json: {write_if_absent(TARGETS, render_targets(account, region), force=args.force)}")
     print(f".env: {write_if_absent(ENV, render_env(account, region), force=args.force)}")
-    caller = identity["Arn"].rsplit("/", 1)[-1]
+    caller = identity.get("Arn", "").rsplit("/", 1)[-1] or "unknown"
     print(f"\naccount={account} region={region} caller={caller}\nnext: make doctor")
     return 0
 

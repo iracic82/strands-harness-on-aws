@@ -14,6 +14,7 @@ from typing import Any
 import botocore
 import pytest
 from botocore.awsrequest import AWSRequest
+from botocore.exceptions import ClientError
 from ops_investigator import sse
 from ops_investigator.runtime_common import MIN_SESSION_LEN
 
@@ -167,6 +168,29 @@ def test_setup_is_idempotent_and_never_clobbers_an_edit(generated, capsys):
     assert setup.main(["--region", "us-west-2", "--force"]) == 0
     assert "written" in capsys.readouterr().out
     assert "AWS_REGION=us-west-2" in generated.env.read_text()
+
+
+def test_setup_writes_nothing_when_sts_refuses(generated, monkeypatch, capsys):
+    """Expired SSO is the normal way this fails. A half-written aws-targets.json would deploy into
+    whatever account the file ended up naming, and the error you would get is about CDK."""
+
+    def raise_expired(*args, **kwargs):
+        raise ClientError({"Error": {"Code": "ExpiredToken", "Message": "token expired"}}, "GetCallerIdentity")
+
+    monkeypatch.setattr(setup.boto3, "client", raise_expired)
+
+    assert setup.main(["--region", "us-west-2"]) == 2
+    assert not generated.targets.exists() and not generated.env.exists()
+    err = capsys.readouterr().err
+    assert "ExpiredToken" in err and "aws sso login" in err
+
+
+def test_setup_refuses_an_identity_without_an_account(generated, monkeypatch, capsys):
+    monkeypatch.setattr(setup.boto3, "client", lambda *args, **kwargs: SimpleNamespace(get_caller_identity=dict))
+
+    assert setup.main(["--region", "us-west-2"]) == 2
+    assert not generated.targets.exists() and not generated.env.exists()
+    assert "without an account id" in capsys.readouterr().err
 
 
 def test_detect_region_prefers_the_flag_then_the_environment_then_the_profile(monkeypatch):

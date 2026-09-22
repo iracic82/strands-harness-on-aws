@@ -46,13 +46,21 @@ test:
 lint: hygiene
 	uv run ruff check . && uv run ruff format --check .
 
-# The public-repo gate: no account id, ARN, Cognito id, or /Users path in a tracked file, and every
-# file that would carry one is git-ignored. Written as an `if` and not `cmd && gitleaks || echo`,
-# because in that form a real leak exits non-zero, falls into the `||`, and the target passes.
+# The public-repo gate: no account id, ARN, Cognito id, /Users path, or the owner's own profile name in
+# anything git would publish, and every file that would carry one is git-ignored.
+#
+# gitleaks runs twice on purpose. The default scan walks commits, so it sees history but not a file you
+# have not committed yet; `--no-git` walks the working tree, so it sees the file you are about to add
+# but no history at all. Neither alone covers the moment a secret is written down.
+#
+# Written as an `if` and not `cmd && gitleaks || echo`, because in that form a real leak exits non-zero,
+# falls into the `||`, prints the "not installed" message, and the target passes. The two scans are
+# joined with `&&` for the same reason: `a; b` in one recipe line reports only b's exit status.
 hygiene:
 	uv run pytest tests/test_repo_hygiene.py -q
 	@if command -v gitleaks >/dev/null; then \
-		gitleaks detect --no-banner --source .; \
+		gitleaks detect --no-banner --source . && \
+		gitleaks detect --no-git --no-banner --source .; \
 	else \
 		echo "gitleaks not installed (brew install gitleaks); the secrets CI job runs it"; \
 	fi
