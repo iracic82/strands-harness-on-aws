@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
+
+log = logging.getLogger("ops_investigator.sse")
 
 SCHEMA_VERSION = 1
 
@@ -27,39 +31,88 @@ def _content_bytes(content: Any) -> int:
             total += len(str(block["text"]))
         elif isinstance(block, dict) and "json" in block:
             total += len(str(block["json"]))
+        elif isinstance(block, dict):
+            total += len(str(block))  # document/image/other blocks: approximate size, not exact bytes
     return total
 
 
-def map_event(event: Any) -> dict | None:
-    """Map a Strands stream event to a v1 SSE frame, or None to drop it. Never raises on odd input."""
-    if not isinstance(event, dict):
+class EventMapper:
+    """Stateful per-turn mapper. Real `tool_use_stream` events arrive once per delta with `input` as a
+    growing JSON *string*; this tracks toolUseId -> name (so `tool_result` frames, which carry no name
+    of their own, can report one) and emits exactly one `tool_use` frame per call, once its input has
+    streamed in as a complete JSON object. Use one instance per turn.
+    """
+
+    def __init__(self) -> None:
+        self._names: dict[str, str] = {}
+        self._emitted: set[str | None] = set()
+
+    def map(self, event: Any) -> dict | None:
+        if not isinstance(event, dict):
+            return None
+        if isinstance(event.get("data"), str):
+            return frame("text", delta=event["data"])
+        if event.get("reasoning") and isinstance(event.get("reasoningText"), str):
+            return frame("thinking", delta=event["reasoningText"])
+        if event.get("type") == "tool_use_stream":
+            return self._map_tool_use_stream(event)
+        if event.get("type") == "tool_result":
+            return self._map_tool_result(event)
         return None
-    if isinstance(event.get("data"), str):
-        return frame("text", delta=event["data"])
-    if event.get("reasoning") and isinstance(event.get("reasoningText"), str):
-        return frame("thinking", delta=event["reasoningText"])
-    if event.get("type") == "tool_use_stream":
+
+    def _map_tool_use_stream(self, event: dict) -> dict | None:
         tu = event.get("current_tool_use")
         tu = tu if isinstance(tu, dict) else {}
-        inp = tu.get("input")
-        inp = inp if isinstance(inp, dict) else {}
-        return frame("tool_use", name=str(tu.get("name", "")), input_keys=sorted(inp.keys()))
-    if event.get("type") == "tool_result":
+        tid = tu.get("toolUseId")
+        name = tu.get("name", "")
+        if tid and name:
+            self._names[tid] = name
+        raw_input = tu.get("input")
+        if isinstance(raw_input, dict):
+            inp: dict | None = raw_input
+        elif isinstance(raw_input, str):
+            try:
+                parsed = json.loads(raw_input)
+            except (ValueError, TypeError):
+                parsed = None
+            inp = parsed if isinstance(parsed, dict) else None
+        else:
+            inp = None
+        if isinstance(inp, dict) and tid not in self._emitted:
+            self._emitted.add(tid)
+            return frame("tool_use", name=str(name), input_keys=sorted(inp.keys()))
+        return None  # partial chunk (input hasn't streamed in as a full JSON object yet), or a repeat
+
+    def _map_tool_result(self, event: dict) -> dict | None:
         tr = event.get("tool_result")
         tr = tr if isinstance(tr, dict) else {}
+        tool_use_id = tr.get("toolUseId", "")
+        name = tr.get("name") or self._names.get(tool_use_id, "")
         return frame(
             "tool_result",
-            name=str(tr.get("name", "")),
+            name=str(name),
             status=str(tr.get("status", "")),
             bytes=_content_bytes(tr.get("content")),
         )
-    return None
 
 
-def estimate_usd(usage: dict, model: str) -> float:
+def map_event(event: Any, mapper: EventMapper | None = None) -> dict | None:
+    """Map a single Strands stream event to a v1 SSE frame, or None to drop it. Never raises on odd input.
+
+    Pass the same `EventMapper` across a turn's events so `tool_use`/`tool_result` frames can dedupe and
+    resolve names across the stream; without one, each call gets a fresh, single-event mapper.
+    """
+    return (mapper or EventMapper()).map(event)
+
+
+def estimate_usd(usage: dict, model: str) -> float | None:
+    """Estimate cost in USD, or None (logging a warning) if `model` doesn't match a known price family."""
     usage = usage if isinstance(usage, dict) else {}
     model = model if isinstance(model, str) else ""
-    family = next((k for k in PRICES if k in model), "sonnet")
+    family = next((k for k in PRICES if k in model), None)
+    if family is None:
+        log.warning("unknown model family for pricing: %s", model)
+        return None
     inp, out, cache = PRICES[family]
     return round(
         usage.get("inputTokens", 0) / 1e6 * inp

@@ -58,24 +58,13 @@ def test_metrics_frame():
 
 
 def test_map_event_handles_current_tool_use_missing_keys():
-    assert sse.map_event({"type": "tool_use_stream", "current_tool_use": {}}) == {
-        "v": 1,
-        "type": "tool_use",
-        "name": "",
-        "input_keys": [],
-    }
-    assert sse.map_event({"type": "tool_use_stream"}) == {
-        "v": 1,
-        "type": "tool_use",
-        "name": "",
-        "input_keys": [],
-    }
-    assert sse.map_event({"type": "tool_use_stream", "current_tool_use": "oops"}) == {
-        "v": 1,
-        "type": "tool_use",
-        "name": "",
-        "input_keys": [],
-    }
+    # No input at all yet (a real partial chunk) -> not a complete JSON object, so no frame, no crash.
+    assert sse.map_event({"type": "tool_use_stream", "current_tool_use": {}}) is None
+    assert sse.map_event({"type": "tool_use_stream"}) is None
+    assert sse.map_event({"type": "tool_use_stream", "current_tool_use": "oops"}) is None
+    # A genuinely zero-argument tool call *does* stream in as a complete (empty) JSON object and emits.
+    ev = {"type": "tool_use_stream", "current_tool_use": {"name": "no_arg_tool", "input": "{}"}}
+    assert sse.map_event(ev) == {"v": 1, "type": "tool_use", "name": "no_arg_tool", "input_keys": []}
 
 
 def test_map_event_handles_content_not_a_list():
@@ -102,3 +91,69 @@ def test_metrics_frame_handles_missing_metrics_attribute():
     result = SimpleNamespace(stop_reason="end_turn")
     out = sse.metrics_frame(result, model="bedrock/global.anthropic.claude-sonnet-5")
     assert out["cycles"] == 0 and out["input_tokens"] == 0 and out["est_usd"] == 0.0
+
+
+# --- Realistic streaming shapes: current_tool_use.input arrives as a growing JSON *string*, one event per
+# delta, and tool_result never carries its own name -- both require a shared EventMapper across the turn. ---
+
+
+def test_streaming_tool_use_input_string_and_tool_result_name_resolution():
+    mapper = sse.EventMapper()
+
+    def tool_use_event(partial_input: str) -> dict:
+        return {
+            "type": "tool_use_stream",
+            "current_tool_use": {"toolUseId": "t1", "name": "aws_call", "input": partial_input},
+        }
+
+    # (a) Three deltas for the same call; only the third has a complete JSON object -> exactly one frame.
+    assert sse.map_event(tool_use_event('{"serv'), mapper=mapper) is None
+    assert sse.map_event(tool_use_event('{"service": "ec2", "oper'), mapper=mapper) is None
+    out = sse.map_event(tool_use_event('{"service": "ec2", "operation": "describe_instances"}'), mapper=mapper)
+    assert out == {"v": 1, "type": "tool_use", "name": "aws_call", "input_keys": ["operation", "service"]}
+
+    # A repeat of the same (now-complete) input for the same toolUseId must not re-emit.
+    assert sse.map_event(tool_use_event('{"service": "ec2", "operation": "describe_instances"}'), mapper=mapper) is None
+
+    # (b) The matching tool_result carries no name of its own -> resolved from the mapper's toolUseId map.
+    result_event = {
+        "type": "tool_result",
+        "tool_result": {"toolUseId": "t1", "status": "success", "content": [{"text": "x" * 10}]},
+    }
+    out = sse.map_event(result_event, mapper=mapper)
+    assert out["name"] == "aws_call" and out["bytes"] == 10 and out["status"] == "success"
+
+    # (c) A tool_result for an id the mapper never saw falls back to an empty name, not a crash.
+    unknown_result = {"type": "tool_result", "tool_result": {"toolUseId": "unknown_id", "status": "success"}}
+    assert sse.map_event(unknown_result, mapper=mapper)["name"] == ""
+
+
+def test_map_event_without_mapper_gets_a_fresh_one_shot_mapper_each_call():
+    # No shared mapper: each call starts over, so a lone partial-JSON chunk never resolves to a tool_use frame.
+    ev = {"type": "tool_use_stream", "current_tool_use": {"toolUseId": "t1", "name": "aws_call", "input": '{"a": 1'}}
+    assert sse.map_event(ev) is None
+
+
+def test_content_bytes_falls_back_for_non_text_non_json_blocks():
+    ev = {
+        "type": "tool_result",
+        "tool_result": {"toolUseId": "t", "name": "reader", "status": "success", "content": [{"document": {}}]},
+    }
+    out = sse.map_event(ev)
+    assert out["bytes"] > 0
+
+
+def test_estimate_usd_returns_none_and_warns_for_unknown_model_family(caplog):
+    with caplog.at_level("WARNING", logger="ops_investigator.sse"):
+        result = sse.estimate_usd({"inputTokens": 1000}, "bedrock/amazon.nova-pro-v1:0")
+    assert result is None
+    assert "unknown model family" in caplog.text
+
+
+def test_metrics_frame_carries_none_est_usd_for_unknown_model_family():
+    result = SimpleNamespace(
+        stop_reason="end_turn",
+        metrics=SimpleNamespace(cycle_count=1, accumulated_usage={"inputTokens": 10}),
+    )
+    out = sse.metrics_frame(result, model="bedrock/amazon.nova-pro-v1:0")
+    assert out["est_usd"] is None
