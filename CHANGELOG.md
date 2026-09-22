@@ -48,7 +48,7 @@ Initial release.
 - **Two arm64 images** built by the generated CDK stack on a native ARM CodeBuild host, from a
   digest-pinned base.
 - **CI** on Python 3.12 and 3.14: ruff, pytest, gitleaks, an arm64 buildx build of both images, and a
-  fresh-clone run of the whole suite. 318 tests, no network.
+  fresh-clone run of the whole suite. 319 tests, no network.
 - **Documentation**: `README.md`, `PITFALLS.md` (50 entries), and a five-part learning path under `docs/`.
 
 ### Pinned versions

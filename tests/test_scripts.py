@@ -529,6 +529,14 @@ def test_makefile_only_reaches_the_agentcore_cli_through_npx_from_the_repo_root(
         assert "cd agentcore" not in body, line
 
 
+def test_make_doctor_stops_on_a_fail_but_not_on_a_warning():
+    """make collapses every non-zero recipe status to its own exit 2, so without the guard a single WARN
+    ends `make setup && make doctor && make dev`. `$$?` is make's escape for the shell's `$?`."""
+    lines = MAKEFILE.read_text().splitlines()
+    recipe = next(line.strip() for line in lines if line.strip().startswith("uv run python doctor.py"))
+    assert recipe.endswith("|| [ $$? -eq 1 ]"), recipe
+
+
 def test_every_script_the_makefile_runs_exists_and_is_executable():
     referenced = {
         word.strip('"')

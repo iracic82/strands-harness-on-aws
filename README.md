@@ -48,8 +48,9 @@ is not consulted on that path -- run `uv run python scripts/setup.py` directly i
 `make doctor` is the whole point of the repo in one command. It checks your Python, uv, Node, and CLI, then
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,
 AgentCore reachability, both models with a real one-token `ConverseStream`, CloudWatch Transaction Search,
-the CDK bootstrap stack, arm64 buildx, and whether you have accidentally committed local transcripts. Exit
-code 0 means all PASS, 1 means a WARN, 2 means a FAIL.
+the CDK bootstrap stack, arm64 buildx, and whether you have accidentally committed local transcripts.
+`doctor.py` exits 0 when every check is PASS, 1 on a WARN, and 2 on a FAIL. `make doctor` passes a WARN
+through and stops only on a FAIL, so one optional tool missing does not end the chain above.
 
 Now run the agent on your laptop. It talks to real Bedrock and real AWS read APIs, but nothing is deployed.
 

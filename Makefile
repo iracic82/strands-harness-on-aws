@@ -19,8 +19,11 @@ AGENTCORE = npx -y @aws/agentcore@0.30.0
 setup:
 	uv run python scripts/setup.py --region $(REGION)
 
+# doctor exits 1 on WARN, 2 on FAIL; only a FAIL should stop the quickstart chain. Without the guard,
+# make collapses any non-zero recipe status to its own exit 2 and a WARN ends `make setup && make doctor`.
+# scripts/smoke.sh runs doctor.py directly and does the same test on the code it gets back.
 doctor:
-	uv run python doctor.py --region $(REGION)
+	uv run python doctor.py --region $(REGION) || [ $$? -eq 1 ]
 
 auth-bootstrap:
 	uv run python scripts/auth_bootstrap.py --region $(REGION) --project $(PROJECT)
