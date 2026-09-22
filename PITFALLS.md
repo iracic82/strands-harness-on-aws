@@ -1,8 +1,9 @@
 # PITFALLS
 
-Fifty-one numbered traps between a Strands harness agent that works on your laptop and one that works on
+Fifty-nine numbered traps between a Strands harness agent that works on your laptop and one that works on
 Amazon Bedrock AgentCore. P1 to P27 were found while designing this repo and are fixed in its code. P28 to
-P51 were found while building it, which is to say the hard way.
+P51 were found while building it, which is to say the hard way. P52 to P59 were found the first time the
+finished repo was deployed into a real account, which is the only way some of them could have been found.
 
 Every entry has the same four fields. **Where in this repo** names the file and function that handles it,
 so you can read the fix rather than trust this page.
@@ -12,13 +13,13 @@ Verified 2026-09-22 against `strands-harness` 0.1.1, `strands-agents` 1.56.0, `b
 
 ## Contents
 
-- [Toolchain and deploy](#toolchain-and-deploy): P1, P16, P18, P20, P39, P44, P47
+- [Toolchain and deploy](#toolchain-and-deploy): P1, P16, P18, P20, P39, P44, P47, P54, P55
 - [Region, models, and access](#region-models-and-access): P5, P6, P7, P17, P25, P28, P29, P30
 - [State, memory, and sessions](#state-memory-and-sessions): P2, P3, P14, P23, P27, P37, P42, P43, P48
 - [Tools and the agent loop](#tools-and-the-agent-loop): P4, P10, P11, P12, P13, P19, P21, P33, P34, P50
-- [Runtime, streaming, and protocols](#runtime-streaming-and-protocols): P9, P22, P24, P35, P36, P40, P41, P45, P46, P51
-- [Security and IAM](#security-and-iam): P15, P26, P31, P32
-- [Observability and operations](#observability-and-operations): P8, P38, P49
+- [Runtime, streaming, and protocols](#runtime-streaming-and-protocols): P9, P22, P24, P35, P36, P40, P41, P45, P46, P51, P52, P58
+- [Security and IAM](#security-and-iam): P15, P26, P31, P32, P53
+- [Observability and operations](#observability-and-operations): P8, P38, P49, P56, P57, P59
 
 ---
 
@@ -44,7 +45,8 @@ shadowed or missing global CLI stops nothing here. Pinned by `tests/test_scripts
 **Fix.** Build with `--platform linux/arm64` everywhere, and check that buildx can do it before you start.
 **Where in this repo.** `app/ops_investigator/Dockerfile` (the CDK builds it on a native ARM CodeBuild
 host, so the plain `docker build` there is already arm64); `.github/workflows/ci.yml` builds both images
-with `--platform linux/arm64`; `doctor.py:_docker_arm64_check` FAILs with the `binfmt` install command.
+with `--platform linux/arm64`; `doctor.py:_docker_arm64_check` WARNs with the `binfmt` install command --
+a WARN, because the deploy path builds on CodeBuild and never touches local Docker at all (P55).
 
 ### P18. Version drift, in a stack where everything is days old
 
@@ -75,8 +77,9 @@ old toolkit.
 logPath}`, where `resources` is a flat array of `{resourceType, name, deploymentState, detail}`. Before the
 first deploy every entry is `local-only` and carries no ARN at all. The real flags are `deploy --dry-run`
 and `logs --runtime <name>`.
-**Fix.** Parse the flat array by `name`, and fall back to scanning the whole document for an ARN that
-belongs to the named runtime. Fail loudly when neither works rather than deploying against an empty string.
+**Fix.** Parse by `name`, and read the ids out of `deployedState` rather than out of `resources[]`.
+Fail loudly when that finds nothing rather than deploying against an empty string. Which field carries the
+ARN is its own trap, and scanning the document for one "belonging to" a runtime does not work: see P54.
 **Where in this repo.** `Makefile` targets `plan` (`deploy --dry-run`), `status` (`status --json`), `logs`
 (`logs --runtime`); `scripts/smoke.sh` (the inline `runtime_arn`/`memory_id` parser and the `${ARN:?}`
 guards).
@@ -106,6 +109,34 @@ the image, and should not be.
 resolves to `app/ops_investigator/policies/execution-role-deny.json`; `policies/execution-role-deny.json`
 at the root is the copy humans read, and
 `tests/test_agentcore_json.py::test_root_policy_copy_matches_the_deployed_one` keeps the two identical.
+
+### P54. Nothing in `agentcore status --json` is called `arn`
+
+**Symptom.** A script that reads a deployed ARN out of `status --json` gets an empty string, and a smoke
+run dies on `ARN: parameter null or not set` immediately after a deploy that succeeded.
+**Cause.** The document has two views of the same deployment and neither uses the obvious key.
+`resources[]` is the display list and calls the ARN `identifier` -- including for the memory, whose *id*
+is only the last path segment of that ARN. `deployedState.targets.<target>.resources` is the
+machine-readable one, keyed by the names in `agentcore.json`, with `runtimeArn`/`runtimeId` and
+`memoryArn`/`memoryId`. Guessing at `arn`, `agentRuntimeArn` or `runtimeArn` on a `resources[]` entry
+finds none of them. Nor can you scan the document for an ARN that "belongs to" a runtime by name: the
+deployed id is `<project>_<Name>-<suffix>`, and `OpsInvestigator` is a prefix of `OpsInvestigatorA2A`.
+**Fix.** Read `deployedState`, match names exactly, and keep `resources[].identifier` as the fallback.
+**Where in this repo.** `scripts/smoke.sh` -- the `status --json` parser, whose docstring carries the
+full shape as returned by CLI 0.30.0.
+
+### P55. `make deploy` needs no Docker, but `doctor` used to fail without it
+
+**Symptom.** `make doctor` exits 2 with `docker_arm64 FAIL` on a machine with no Docker, and
+`scripts/smoke.sh` refuses to start -- on a machine where the deploy would have worked.
+**Cause.** The CDK stack the CLI synthesises contains a CodeBuild project (`ContainerBuildProject`,
+environment type `ARM_CONTAINER`, image `aws/codebuild/amazonlinux-aarch64-standard:3.0`) and a custom
+resource that triggers it. Both arm64 images are built and pushed inside the account; the laptop's Docker
+is never invoked. It is still needed to run the container locally and by the CI job that builds the
+images directly, so the check is worth keeping -- as a warning.
+**Fix.** Make it a WARN, and say in the message what it is actually for.
+**Where in this repo.** `doctor.py:_docker_arm64_check`. Pinned by
+`tests/test_doctor.py::test_docker_arm64_missing_platform_warns_because_deploy_builds_on_codebuild`.
 
 ---
 
@@ -579,6 +610,34 @@ the result and the caller still gets `denied` then `tool_result` with `status=er
 made directly the SDK streams its own `tool_cancel_event` as well, and `EventMapper` dedupes the two by
 `toolUseId`, so that path still produces exactly one `denied` frame.
 
+### P52. `requestHeaderAllowlist` drops every header you did not name, including `A2A-Version`
+
+**Symptom.** The A2A agent card fetches fine (HTTP 200 with the bearer, 401 without), and then every
+`SendMessage` fails with
+`VersionNotSupportedError: A2A version '0.3' is not supported by this handler. Expected version '1.0'.`
+The client is a2a-sdk 1.x and is demonstrably sending `A2A-Version: 1.0` -- point it at a local socket and
+you can read the header in the request.
+**Cause.** AgentCore Runtime forwards only the headers named in `requestHeaderAllowlist` and silently
+drops the rest. With `["Authorization"]` the version header never reaches the container, and a2a-sdk's
+server-side validator reads a *missing* header as 0.3 (`a2a/utils/version_validator.py` returns
+`PROTOCOL_VERSION_0_3` when it finds nothing) and then rejects 0.3 against the handler's 1.0. The card is
+unaffected because a `GET` of the well-known path carries no version header to begin with, which is what
+makes this look like an auth or SDK problem rather than a config one.
+**Fix.** Name every header the protocol needs, not only the one you authenticate with:
+`"requestHeaderAllowlist": ["Authorization", "A2A-Version"]` on the A2A runtime.
+**Where in this repo.** `agentcore/agentcore.json` (the `OpsInvestigatorA2A` runtime). Pinned by
+`tests/test_agentcore_json.py::test_agentcore_json_shape`.
+
+### P58. A non-streaming A2A answer is inside the Task, not an `artifactUpdate`
+
+**Symptom.** `SendMessage` reports `state=TASK_STATE_COMPLETED` and the client prints no answer at all.
+**Cause.** With `ClientConfig(streaming=False)` the server publishes one `Task` and nothing else, and the
+answer is in `task.artifacts[].parts[].text`. A summariser that renders only the task's id and state
+throws it away; the `artifactUpdate` branch it was written for only fires on the streaming path.
+**Fix.** Render a Task's artifacts as well as its state.
+**Where in this repo.** `scripts/a2a_client.py:summarize_event`. Pinned by
+`tests/test_scripts.py::test_summarize_event_prints_the_artifacts_a_completed_task_carries`.
+
 ---
 
 ## Security and IAM
@@ -632,6 +691,17 @@ profile writes to. The cloud profile never touches it, because there the workspa
 bedrock_agentcore`. The cloud profile's `write` and `edit` tools are off anyway (P21), which is the second
 layer.
 
+### P53. `make invoke` prints your bearer token
+
+**Symptom.** A JWT that is good for the next hour scrolls past in the terminal -- and into CI logs, and
+into any screenshot of the demo.
+**Cause.** make echoes a recipe before running it, and these recipes take the token as a variable. The
+README's own quickstart line, `make invoke ARN="$ARN" TOKEN="$TOKEN" PROMPT="..."`, prints it in full.
+**Fix.** Prefix every recipe that interpolates `$(TOKEN)` with `@`. Nothing is lost: the scripts still
+print the session id and the frames, which is the part worth watching.
+**Where in this repo.** `Makefile` (`invoke`, `a2a-card`; `token` was already `@`). Pinned by
+`tests/test_scripts.py::test_no_makefile_recipe_echoes_the_token`.
+
 ---
 
 ## Observability and operations
@@ -648,7 +718,10 @@ own exporter and competes with ADOT for ownership.
 **Where in this repo.** `doctor.py:_transaction_search_check` calls `xray:GetTraceSegmentDestination` and
 FAILs with the enable command; `app/ops_investigator/Dockerfile` has
 `CMD ["opentelemetry-instrument", "python", "-m", "main"]`; `preflight.run_preflight` WARNs if
-`OTEL_TRACES_EXPORTER` is set; `agentcore/agentcore.json` never sets it.
+`OTEL_TRACES_EXPORTER` holds anything other than ADOT's own `otlp`; `agentcore/agentcore.json` never sets
+it. Two follow-ups from the first real deploy: ADOT sets that variable itself, so checking merely that it
+is *set* warns on every healthy start (P56), and Transaction Search reports ACTIVE well before `aws/spans`
+has anything in it (P59).
 
 ### P38. Naming a script after a stdlib module breaks every script beside it
 
@@ -675,3 +748,41 @@ runs before `app.run()`, so there is no window in which something else does it f
 `INFO` so the SDKs stay quiet.
 **Where in this repo.** `runtime_common.configure_logging`, called from `http_app.startup` and
 `a2a_app.main`. Pinned by `tests/test_runtime_common.py::test_configure_logging_sends_this_package_to_info`.
+
+### P56. ADOT sets `OTEL_TRACES_EXPORTER` itself, so P8's check fired on every healthy start
+
+**Symptom.** Every cold start logs `preflight otel_exporter=WARN OTEL_TRACES_EXPORTER is set`, in a
+runtime whose `agentcore.json` never sets it and whose tracing is demonstrably working.
+**Cause.** The container's `CMD` is `opentelemetry-instrument ...`, which loads the ADOT distro before
+the application runs, and the distro does `os.environ.setdefault(OTEL_TRACES_EXPORTER, "otlp")` under
+AgentCore's agent-observability mode (`amazon/opentelemetry/distro/aws_opentelemetry_distro.py`). By the
+time preflight reads the environment, ADOT has set the very variable preflight was checking for -- so the
+check could never pass in the cloud.
+**Fix.** Warn on a value ADOT would not have chosen rather than on the variable existing. `otlp` is the
+healthy state; anything else means a human took the exporter away from ADOT, which is what P8 is about.
+**Where in this repo.** `preflight.run_preflight` and `preflight.ADOT_TRACES_EXPORTER`. Pinned by
+`tests/test_preflight.py::test_cloud_checks_tempdir_and_otel` and
+`::test_cloud_warns_when_something_takes_the_exporter_away_from_adot`.
+
+### P57. `agentcore logs` follows the stream and shows you no history
+
+**Symptom.** `make logs` prints `Streaming logs for <runtime>... (Ctrl+C to stop)` and then nothing, for
+an invoke that plainly happened a minute ago. In a script it never returns at all.
+**Cause.** It is a tail, not a dump: it attaches to the live stream and shows only what is written after
+it attaches.
+**Fix.** Use it to watch an invoke you are about to make. To read what already happened, query the log
+group directly: `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`.
+**Where in this repo.** `Makefile` (the comment above the `logs` target).
+
+### P59. Transaction Search is ACTIVE long before `aws/spans` has anything in it
+
+**Symptom.** Traces are in X-Ray, `xray:GetTraceSegmentDestination` says `CloudWatchLogs` / `ACTIVE` with
+a 100% indexing rule, and a Logs Insights query over `aws/spans` returns zero rows for your service.
+**Cause.** Enabling Transaction Search and indexing spans into `aws/spans` are not the same step. The
+CLI's own deploy output says so ("It takes ~10 minutes for transaction search to be fully active and for
+traces from invocations to be indexed"); in this repo's first cloud smoke `aws/spans` was still empty
+after fifteen minutes while X-Ray already held 41 traces from the two runtimes.
+**Fix.** Never read an empty `aws/spans` as "not instrumented". Check X-Ray over the same window first --
+that is the difference between "not indexed yet" and "no spans at all" -- and re-run the query later.
+**Where in this repo.** `scripts/smoke.sh` -- the span check queries `aws/spans` and X-Ray and reports
+which of the two answered.

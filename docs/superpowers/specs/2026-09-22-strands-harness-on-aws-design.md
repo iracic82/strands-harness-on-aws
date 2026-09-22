@@ -345,11 +345,31 @@ under `.claude/` stay untracked.
 
 ## 10. Open items (implementation-time verification)
 
-1. `requestHeaderAllowlist` exact key name in `agentcore.json` for `CUSTOM_JWT`
-   (CLI flag `--request-header-allowlist Authorization` exists).
-2. Exact env var name/value for ADOT content capture (`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT`
-   semantics read as "true keeps payloads"; verify against the current doc before wiring).
-3. Whether `a2a-sdk` 1.x installs cleanly alongside `strands-agents` (no shared pins
-   expected; verify in `uv lock`).
-4. Log-group retention: CDK context key or manual.
-5. Sonnet 5 Bedrock pricing for the README cost note.
+Resolved against a real deployment in `us-west-2` on 2026-09-22 (the first cloud smoke), except 10.5.
+
+1. **`requestHeaderAllowlist` — confirmed, and it is an allowlist in the strict sense.** The key name is
+   right, and with `["Authorization"]` the JWT reached `context.request_headers`: the runtime log line for
+   a real invoke reads `turn start session=<id> actor=<the JWT sub>`, so `auth.actor_from_headers` derived
+   the actor from the token and never fell back. What the spec did not anticipate is that AgentCore drops
+   every header *not* named, which broke A2A outright until `A2A-Version` was added to the A2A runtime's
+   list. See PITFALLS P52.
+2. **ADOT content capture — the reading was backwards.** `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` is an
+   opt-*out*: `amazon/opentelemetry/distro/_utils.py` treats it as false by default and only `"true"` turns
+   capture off. ADOT additionally sets `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` when
+   `AGENT_OBSERVABILITY_ENABLED=true`, which is the AgentCore default. So prompt and response content is
+   captured into traces unless you opt out, which is a privacy decision worth making deliberately rather
+   than a wiring detail. Related: ADOT also sets `OTEL_TRACES_EXPORTER` itself (PITFALLS P56).
+3. **`a2a-sdk` 1.x alongside `strands-agents` — confirmed, no conflict.** `uv.lock` resolves `a2a-sdk`
+   1.1.5 with `strands-agents[otel]` 1.56.0, and both images built and ran with that lock.
+4. **Log-group retention — manual, and there is no CDK context key for the part that matters.** The two
+   runtime log groups (`/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`) are created by the AgentCore
+   platform, not by the stack, and come out with retention *never expire*. The log groups CDK does own are
+   set for it (the two container-build Lambdas get 731 days); the CodeBuild project's group also never
+   expires. Setting retention on the runtime groups is a `PutRetentionPolicy` you make yourself after the
+   first deploy.
+5. **Bedrock pricing — still open.** `sse.PRICES` remains the unverified estimate it always was, and it is
+   keyed by family (`sonnet`/`opus`/`haiku`), not by a specific version. Note the deployed model is
+   `global.anthropic.claude-sonnet-4-6`, not Sonnet 5, so the item as written no longer names what runs
+   here. For scale, the metrics frames from the smoke reported roughly $0.0008 for a one-line answer and
+   about $0.03 for a four-cycle investigation with tool calls. Check the published price list before
+   quoting any of this in the README.

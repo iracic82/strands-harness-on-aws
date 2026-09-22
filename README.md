@@ -18,8 +18,10 @@ step of that lab onto this repo.
 
 ## Run it locally in five minutes
 
-You need Python 3.12, [uv](https://docs.astral.sh/uv/), Node 20+, Docker with buildx, and AWS credentials
-with Bedrock access in a region where AgentCore runs.
+You need Python 3.12, [uv](https://docs.astral.sh/uv/), Node 20+, and AWS credentials with Bedrock access
+in a region where AgentCore runs. Docker with buildx is optional: `make deploy` builds both arm64 images on
+an ARM CodeBuild host inside your account, so Docker is only needed to run the container on your own
+machine (PITFALLS P55).
 
 ```bash title="manual"
 git clone https://github.com/iracic82/strands-harness-on-aws.git
@@ -48,7 +50,8 @@ is not consulted on that path -- run `uv run python scripts/setup.py` directly i
 `make doctor` is the whole point of the repo in one command. It checks your Python, uv, Node, and CLI, then
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,
 AgentCore reachability, both models with a real one-token `ConverseStream`, CloudWatch Transaction Search,
-the CDK bootstrap stack, arm64 buildx, and whether you have accidentally committed local transcripts.
+the CDK bootstrap stack, arm64 buildx (a WARN: the deploy builds remotely), and whether you have
+accidentally committed local transcripts.
 `doctor.py` exits 0 when every check is PASS, 1 on a WARN, and 2 on a FAIL. `make doctor` runs it with
 `--exit-on fail`, which reports 2 for a FAIL and 0 for anything else, so one optional tool missing does
 not end the chain above and a broken interpreter still does.
@@ -121,8 +124,17 @@ AWS_PROFILE=<your-profile> DEMO_PASSWORD='<a strong password>' bash scripts/smok
 ```
 
 It runs `doctor`, bootstraps auth, deploys, reads the ARNs out of `status`, writes the A2A URL back,
-deploys a second time, runs the demo, and then checks CloudWatch for exactly one `invoke_agent` span per
-invoke.
+deploys a second time, runs the demo, and then counts `invoke_agent` spans. On the first real run the first
+deploy took about four minutes (both images build in parallel on CodeBuild; the memory is the slow part)
+and each later deploy about ninety seconds. Budget ten minutes for the whole script.
+
+Two things about that span count are worth knowing before you read it as a failure. Transaction Search is
+enabled per region and takes several minutes after the deploy to start indexing into `aws/spans`, so the
+count can be zero while tracing is working perfectly -- which is why the script also counts X-Ray traces
+for the same window (PITFALLS P59). And the answer to "which token does the authorizer accept" is the
+**access** token, not the ID token: `allowedClients` is matched against the `client_id` claim, which only
+the access token carries, and an ID token comes back `401 Claim 'client_id' value mismatch with
+configuration` (PITFALLS P24).
 
 Then invoke the deployed runtime with a real token:
 
@@ -362,7 +374,7 @@ in, but nothing here loads it for you: there is no dotenv dependency, so source 
 | `AWS_REGION` and `AWS_DEFAULT_REGION` | `us-west-2` | Always set both. botocore reads only the second one (PITFALLS P28) |
 | `A2A_PUBLIC_URL` | placeholder | The A2A runtime's own invocation URL, which the agent card advertises. Written back after the first deploy |
 | `COGNITO_DISCOVERY_URL` | placeholder | The OIDC discovery document the A2A card names in its security scheme. Written by `auth_bootstrap` |
-| `OTEL_TRACES_EXPORTER` | unset, keep it that way | Setting it makes the harness fight ADOT for the exporter and you lose your traces (PITFALLS P8) |
+| `OTEL_TRACES_EXPORTER` | set to `otlp` by ADOT itself | Leave it alone. ADOT sets it before your code runs; setting it to anything else makes the harness fight ADOT for the exporter and you lose your traces (PITFALLS P8, P56) |
 
 ## Tested versions
 
