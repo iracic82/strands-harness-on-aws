@@ -23,6 +23,7 @@ ops-investigator = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]  # repo root, so tests/test_doctor.py can `import doctor` (standalone script at the repo root)
 asyncio_mode = "auto"
 markers = ["live: needs AWS credentials and network; skipped by default"]
 addopts = "-m 'not live'"
