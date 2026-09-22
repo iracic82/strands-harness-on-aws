@@ -41,11 +41,16 @@ import boto3
 import httpx
 from botocore import UNSIGNED
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
 DEV_URL = "http://localhost:8080"
 SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
 ACTOR_HEADER = "X-Actor-Id"
 DATA_PREFIX = "data: "
+BEARER_HINT = (
+    ". A CUSTOM_JWT runtime does not accept SigV4: pass --token (scripts/get_token.py prints one), "
+    "or use --transport https, which needs the same token."
+)
 # The runtime's own wall clock (HARNESS_MAX_SECONDS) is 600s and it reports its timeout as a frame;
 # the client has to outlive that or it hides the answer it was waiting for.
 TIMEOUT = 900.0
@@ -182,7 +187,17 @@ def bearer_client(region: str, token: str | None) -> Any:
 @contextlib.contextmanager
 def _boto3_stream(args: argparse.Namespace, session: str, body: bytes) -> Iterator[Iterable[bytes]]:
     client = bearer_client(args.region, args.token)
-    response = client.invoke_agent_runtime(agentRuntimeArn=args.arn, runtimeSessionId=session, payload=body)
+    try:
+        response = client.invoke_agent_runtime(agentRuntimeArn=args.arn, runtimeSessionId=session, payload=body)
+    except ClientError as e:
+        # Symmetry with _http_stream: a transport-level refusal is an InvokeError with a hint, not a
+        # botocore traceback. The common one is calling a CUSTOM_JWT runtime with SigV4 and no bearer,
+        # which comes back as AccessDeniedException "Authorization method mismatch" (P45).
+        err = e.response.get("Error", {})
+        detail = f"{err.get('Code', 'ClientError')}: {err.get('Message', e)}".strip(": ")
+        raise InvokeError(f"{detail}{'' if args.token else BEARER_HINT}") from e
+    except BotoCoreError as e:
+        raise InvokeError(f"{type(e).__name__}: {e}") from e
     stream = response["response"]
     try:
         yield stream.iter_lines()

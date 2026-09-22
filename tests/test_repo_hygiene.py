@@ -95,6 +95,33 @@ def test_no_account_specific_values_are_in_the_working_tree():
     assert bad == [], "\n".join(bad)
 
 
+def test_every_pitfall_citation_resolves_to_a_pitfall():
+    """`(P52)` in a comment is a promise that PITFALLS.md has a P52 and that it is about this.
+
+    The numbers cannot be checked for *subject*, but they can be checked for existence, and that is the
+    failure that actually happens: eight entries were added at once and a dozen comments were written
+    against the first number in the batch. A citation that points at a heading which does not exist is
+    always wrong; one that resolves is at least reviewable.
+    """
+    headings = set(re.findall(r"^#+ P(\d+)\.", (ROOT / "PITFALLS.md").read_text(), re.M))
+    assert headings, "PITFALLS.md has no '### P<n>.' headings; delete this test with them"
+    citation = re.compile(r"\bP(\d{1,3})\b")
+    bad = []
+    for rel in _publishable():
+        if rel == "PITFALLS.md" or not (rel.endswith((".py", ".sh", ".md")) or Path(rel).name == "Makefile"):
+            continue
+        try:
+            text = (ROOT / rel).read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        bad += [
+            f"{rel}: {m.group(0)} has no entry in PITFALLS.md"
+            for m in citation.finditer(text)
+            if m.group(1) not in headings
+        ]
+    assert bad == [], "\n".join(bad)
+
+
 def test_generated_files_are_ignored():
     """Ignored, not merely absent: the next `git add -A` after a deploy is what this prevents."""
     for rel in (

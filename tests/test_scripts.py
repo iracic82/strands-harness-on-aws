@@ -426,7 +426,7 @@ def test_summarize_event_handles_each_stream_response_shape():
 
 
 def test_summarize_event_prints_the_artifacts_a_completed_task_carries():
-    """A non-streaming SendMessage returns the answer inside the Task, not as an artifactUpdate (P52)."""
+    """A non-streaming SendMessage returns the answer inside the Task, not as an artifactUpdate (P58)."""
     completed = {
         "task": {
             "id": "t2",
@@ -578,7 +578,7 @@ def test_makefile_declares_every_target_phony():
 
 def test_no_makefile_recipe_echoes_the_token():
     """make prints a recipe before it runs it, so a recipe that interpolates $(TOKEN) puts a live bearer
-    JWT in the terminal, in CI logs, and in any screenshot of the demo (P52)."""
+    JWT in the terminal, in CI logs, and in any screenshot of the demo (P53)."""
     # A backslash continuation is one logical recipe line, and the `@` that suppresses it can only be on
     # the first of them -- so join first, or the second half of `invoke` reads as an unsuppressed line.
     logical: list[str] = []
@@ -593,3 +593,9 @@ def test_no_makefile_recipe_echoes_the_token():
         if line.startswith("\t") and "$(TOKEN)" in line and not line.lstrip("\t").startswith("@")
     ]
     assert offenders == [], f"these recipe lines would echo the bearer token: {offenders}"
+
+    # `token` interpolates no $(TOKEN) -- it *mints* one -- so the loop above cannot see it, and it is the
+    # one recipe whose echo would print the command that produces the JWT next to the JWT itself.
+    body = [line for line in logical[logical.index("token:") + 1 :] if line.startswith("\t")]
+    assert body, "the Makefile has no `token:` recipe body"
+    assert body[0].lstrip("\t").startswith("@"), f"`token:` must be silent, got: {body[0].strip()}"

@@ -18,7 +18,7 @@ log = logging.getLogger("ops_investigator.preflight")
 # variable, but `opentelemetry-instrument` loads the ADOT distro before the app starts and the distro does
 # `os.environ.setdefault(OTEL_TRACES_EXPORTER, "otlp")` under AgentCore's agent-observability mode
 # (amazon/opentelemetry/distro/aws_opentelemetry_distro.py). So "set to otlp" is the healthy state, and
-# only some *other* value means a human took the exporter away from ADOT (P8, P52).
+# only some *other* value means a human took the exporter away from ADOT (P8, P56).
 ADOT_TRACES_EXPORTER = "otlp"
 
 # The fix a human should apply, keyed by the Bedrock error code a 1-token ConverseStream returns (P25).
@@ -129,15 +129,25 @@ def run_preflight(env: Mapping[str, str] | None = None, *, probe_model: bool = T
     except OSError as e:
         rep.add("tempdir", "FAIL", f"{tmp} is not writable: {e}. The harness needs a writable workspace (P2).")
     rep.add("memory_id", "PASS", rt.memory_id or "")
+    # Three states, and only one of them is healthy. `otlp` is ADOT's own setting. Some *other* value means
+    # a human took the exporter away from ADOT. **Unset** is not "clean" in the cloud -- ADOT sets this
+    # before the app starts, so an empty value means the distro never loaded and there is no tracing at all.
     exporter = env.get("OTEL_TRACES_EXPORTER", "")
-    if exporter and exporter != ADOT_TRACES_EXPORTER:
+    if not exporter:
+        rep.add(
+            "otel_exporter",
+            "WARN",
+            "OTEL_TRACES_EXPORTER is unset; ADOT sets it to 'otlp' before the app starts, so the distro "
+            "did not load -- check the image CMD is opentelemetry-instrument (P8, P56).",
+        )
+    elif exporter != ADOT_TRACES_EXPORTER:
         rep.add(
             "otel_exporter",
             "WARN",
             f"OTEL_TRACES_EXPORTER={exporter!r}; ADOT should own the exporter in AgentCore (P8).",
         )
     else:
-        rep.add("otel_exporter", "PASS", f"{exporter or 'unset'}; ADOT owns tracing")
+        rep.add("otel_exporter", "PASS", f"{exporter}; ADOT owns tracing")
     if probe_model:
         _check_model(rep, rt)
     return rep

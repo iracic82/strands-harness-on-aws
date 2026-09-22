@@ -256,7 +256,7 @@ def test_docker_check_skipped_for_codezip_build():
 
 def test_docker_arm64_missing_platform_warns_because_deploy_builds_on_codebuild():
     """A deploy builds both images on an ARM CodeBuild host, so no local Docker is involved and this
-    must not be the FAIL that stops `make doctor` and scripts/smoke.sh (P52)."""
+    must not be the FAIL that stops `make doctor` and scripts/smoke.sh (P55)."""
 
     def run_cmd(args, **k):
         from types import SimpleNamespace

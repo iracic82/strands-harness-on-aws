@@ -43,7 +43,7 @@ dev:
 #
 # `@`, like every recipe below that interpolates $(TOKEN): make echoes a recipe before running it, so
 # without it the whole bearer JWT is printed to the terminal, into CI logs, and into any screenshot of
-# the demo. The script still prints its session id and frames, which is the part worth seeing (P52).
+# the demo. The script still prints its session id and frames, which is the part worth seeing (P53).
 invoke:
 	@$(REGION_ENV) uv run python scripts/invoke.py --region $(REGION) --prompt "$(PROMPT)" \
 		$(if $(ARN),--arn "$(ARN)" --transport $(TRANSPORT),--dev) $(if $(TOKEN),--token "$(TOKEN)",)
@@ -88,7 +88,7 @@ status:
 logs:
 	$(AGENTCORE) logs --runtime $(RUNTIME)
 
-# `@` for the same reason as `invoke`: this recipe interpolates the bearer JWT (P52).
+# `@` for the same reason as `invoke`: this recipe interpolates the bearer JWT (P53).
 a2a-card:
 	@$(REGION_ENV) uv run python scripts/a2a_client.py --url "$(A2A_URL)" $(if $(TOKEN),--token "$(TOKEN)",) \
 		$(if $(A2A_PROMPT),--prompt "$(A2A_PROMPT)",)

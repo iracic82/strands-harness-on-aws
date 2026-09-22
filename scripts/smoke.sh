@@ -27,6 +27,10 @@ make auth-bootstrap
 make deploy
 
 STATUS=$($AGENTCORE status --json)
+# The `${ARN:?}` guards below only fail loudly if the parser is the only thing that can set these. An
+# ARN left over in the caller's environment from an earlier run would sail past them and be deployed
+# against silently, which is the one failure mode worse than stopping.
+unset ARN A2A_ARN MEMORY_ID
 eval "$(uv run python - "$STATUS" <<'PY'
 """Print shell assignments for the deployed ids.
 
@@ -118,10 +122,10 @@ bash scripts/demo.sh
 
 echo "== span check: one invoke_agent span per invoke (GenAI observability, spec 8)"
 # Two sources on purpose. `aws/spans` is where CloudWatch Transaction Search indexes spans, and it is what
-# the GenAI Observability console reads -- but enabling Transaction Search takes effect minutes after the
-# deploy that enabled it reports success, so a fresh account can have working tracing and an empty
-# `aws/spans` for a while. X-Ray answers straight away, so an empty span count is only news when X-Ray is
-# empty too; that distinction is the difference between "not indexed yet" and "not instrumented" (P52).
+# the GenAI Observability console reads -- but enabling Transaction Search is not the same as it working:
+# in this repo's first cloud run the group was still empty of this agent's spans an hour later, while
+# X-Ray already had them. X-Ray answers straight away, so an empty span count is only news when X-Ray is
+# empty too; that distinction is the difference between "not indexed yet" and "not instrumented" (P59).
 uv run python - "$REGION" <<'PY'
 import datetime
 import sys
@@ -132,40 +136,56 @@ import boto3
 region = sys.argv[1]
 logs = boto3.client("logs", region_name=region)
 now = int(time.time())
-query = logs.start_query(
-    logGroupName="aws/spans",
-    startTime=now - 1800,
-    endTime=now,
-    queryString="fields name | filter name like /invoke_agent ops-investigator/ | stats count() as n",
-)["queryId"]
 spans = None
-for _ in range(20):
-    result = logs.get_query_results(queryId=query)
-    if result["status"] == "Complete":
-        rows = result.get("results") or []
-        spans = int(rows[0][0]["value"]) if rows else 0
-        break
-    if result["status"] in ("Failed", "Cancelled"):
-        print(f"aws/spans query {result['status']}")
-        break
-    time.sleep(3)
-else:
-    print("aws/spans query still running; check CloudWatch Logs Insights on aws/spans")
+try:
+    query = logs.start_query(
+        logGroupName="aws/spans",
+        startTime=now - 1800,
+        endTime=now,
+        queryString="fields name | filter name like /invoke_agent ops-investigator/ | stats count() as n",
+    )["queryId"]
+except logs.exceptions.ResourceNotFoundException:
+    # The group is created by Transaction Search on first delivery, so on a fresh account it does not
+    # exist yet. That is the same state P59 describes, not a reason to fail a smoke that has already paid
+    # for a deploy and a demo.
+    print("aws/spans does not exist yet; Transaction Search has not delivered a span in this region (P59)")
+    query = None
+
+if query is not None:
+    for _ in range(20):
+        result = logs.get_query_results(queryId=query)
+        if result["status"] == "Complete":
+            rows = result.get("results") or []
+            spans = int(rows[0][0]["value"]) if rows else 0
+            break
+        if result["status"] in ("Failed", "Cancelled"):
+            print(f"aws/spans query {result['status']}")
+            break
+        time.sleep(3)
+    else:
+        print("aws/spans query still running; check CloudWatch Logs Insights on aws/spans")
 
 if spans is not None:
     print(f"invoke_agent spans in aws/spans (last 30 min): {spans}")
 
+# Paginated: a busy account can push this agent's traces past the first page, and an undercount here
+# would read as "tracing is broken" exactly when it is not.
 end = datetime.datetime.now(datetime.timezone.utc)
-traces = boto3.client("xray", region_name=region).get_trace_summaries(
+ours = 0
+pages = boto3.client("xray", region_name=region).get_paginator("get_trace_summaries")
+for page in pages.paginate(
     StartTime=end - datetime.timedelta(minutes=30), EndTime=end, TimeRangeType="Event"
-)["TraceSummaries"]
-ours = [t for t in traces if any("OpsInvestigator" in (s.get("Name") or "") for s in t.get("ServiceIds") or [])]
-print(f"X-Ray traces naming an OpsInvestigator runtime (last 30 min): {len(ours)}")
-if spans == 0 and ours:
+):
+    for trace in page.get("TraceSummaries", []):
+        if any("OpsInvestigator" in (s.get("Name") or "") for s in trace.get("ServiceIds") or []):
+            ours += 1
+print(f"X-Ray traces naming an OpsInvestigator runtime (last 30 min): {ours}")
+if not spans and ours:
     print(
-        "Tracing works; Transaction Search has not indexed into aws/spans yet. It is enabled per region "
-        "and takes a few minutes to start delivering after the deploy that enabled it (P52). Re-run this "
-        "query later, or open GenAI Observability, which reads the same index."
+        "Tracing works; Transaction Search has not indexed into aws/spans. Enabling it is per region and "
+        "delivery can lag by tens of minutes -- and in a region where it was only just enabled it may not "
+        "arrive during this run at all (P59). Read X-Ray, and use the X-Ray trace view for screenshots; "
+        "GenAI Observability is the richer view once Transaction Search delivers."
     )
 PY
 

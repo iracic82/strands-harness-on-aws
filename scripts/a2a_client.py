@@ -72,7 +72,7 @@ def summarize_event(event: dict) -> str:
         lines = [f"[task] id={task.get('id', '')} context={task.get('contextId', '')} state={state}"]
         # A non-streaming SendMessage answers with one Task and nothing else, so the answer arrives as
         # `task.artifacts` rather than as its own `artifactUpdate` event. Reporting only the state here
-        # printed the task id and threw the answer away (P52).
+        # printed the task id and threw the answer away (P58).
         lines += [
             f"[artifact] {artifact.get('name', '')}: {_part_text(artifact.get('parts'))}"
             for artifact in task.get("artifacts") or []

@@ -307,7 +307,7 @@ def _cdk_bootstrap_check(clients: ClientFactory, region: str) -> Check:
 
 
 def _docker_arm64_check(run_cmd: Callable[..., subprocess.CompletedProcess[str]]) -> Check:
-    """WARN, not FAIL: `make deploy` does not build anything on this machine (P52).
+    """WARN, not FAIL: `make deploy` does not build anything on this machine (P55).
 
     The CDK stack the CLI synthesises carries a CodeBuild project (`ContainerBuildProject`, environment
     type ARM_CONTAINER) and a custom resource that triggers it, so both arm64 images are built and pushed
@@ -327,7 +327,7 @@ def _docker_arm64_check(run_cmd: Callable[..., subprocess.CompletedProcess[str]]
         else (
             "`make deploy` builds the arm64 images on a CodeBuild ARM host and does not need this. "
             "Docker with buildx and QEMU (docker run --privileged tonistiigi/binfmt --install arm64) is "
-            "needed only to run the container locally (P16, P52)."
+            "needed only to run the container locally (P16, P55)."
         ),
     )
 

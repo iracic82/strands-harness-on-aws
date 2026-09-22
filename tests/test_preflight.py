@@ -26,7 +26,7 @@ def test_bad_effort_fails_as_config():
 
 def test_cloud_checks_tempdir_and_otel(monkeypatch, tmp_path):
     """`otlp` is ADOT's own setting, not a human's: the distro sets it before the app starts, so warning
-    about it fired on every healthy cloud start and meant nothing (P52)."""
+    about it fired on every healthy cloud start and meant nothing (P56)."""
     monkeypatch.setattr(preflight.tempfile, "gettempdir", lambda: str(tmp_path))
     rep = preflight.run_preflight(env={**CLOUD, "OTEL_TRACES_EXPORTER": "otlp"}, probe_model=False)
     names = {c[0]: c[1] for c in rep.checks}
@@ -40,6 +40,17 @@ def test_cloud_warns_when_something_takes_the_exporter_away_from_adot(monkeypatc
     rep = preflight.run_preflight(env={**CLOUD, "OTEL_TRACES_EXPORTER": "console"}, probe_model=False)
     names = {c[0]: c[1] for c in rep.checks}
     assert names["otel_exporter"] == "WARN"  # harness would fight ADOT for the exporter (P8)
+    assert rep.ok
+
+
+def test_cloud_warns_when_the_exporter_is_unset_because_that_means_adot_never_loaded(monkeypatch, tmp_path):
+    """Unset is not the clean state in the cloud. ADOT sets it before the app starts, so an empty value
+    means `opentelemetry-instrument` did not wrap the process and there is no tracing at all (P56)."""
+    monkeypatch.setattr(preflight.tempfile, "gettempdir", lambda: str(tmp_path))
+    rep = preflight.run_preflight(env=CLOUD, probe_model=False)
+    check = next(c for c in rep.checks if c[0] == "otel_exporter")
+    assert check[1] == "WARN"
+    assert "opentelemetry-instrument" in check[2]
     assert rep.ok
 
 
