@@ -1,8 +1,8 @@
 # PITFALLS
 
-Sixty numbered traps between a Strands harness agent that works on your laptop and one that works on
+Sixty-one numbered traps between a Strands harness agent that works on your laptop and one that works on
 Amazon Bedrock AgentCore. P1 to P27 were found while designing this repo and are fixed in its code. P28 to
-P51 were found while building it, which is to say the hard way. P52 to P60 were found the first time the
+P51 were found while building it, which is to say the hard way. P52 to P61 were found the first time the
 finished repo was deployed into a real account, which is the only way some of them could have been found.
 
 Every entry has the same four fields. **Where in this repo** names the file and function that handles it,
@@ -19,7 +19,7 @@ Verified 2026-09-22 against `strands-harness` 0.1.1, `strands-agents` 1.56.0, `b
 - [Tools and the agent loop](#tools-and-the-agent-loop): P4, P10, P11, P12, P13, P19, P21, P33, P34, P50
 - [Runtime, streaming, and protocols](#runtime-streaming-and-protocols): P9, P22, P24, P35, P36, P40, P41, P45, P46, P51, P52, P58
 - [Security and IAM](#security-and-iam): P15, P26, P31, P32, P53, P60
-- [Observability and operations](#observability-and-operations): P8, P38, P49, P56, P57, P59
+- [Observability and operations](#observability-and-operations): P8, P38, P49, P56, P57, P59, P61
 
 ---
 
@@ -820,3 +820,59 @@ view, but it reads the index that is empty.
 **Where in this repo.** `scripts/smoke.sh` -- the span check queries `aws/spans` and X-Ray, reports which
 of the two answered, and treats a missing `aws/spans` log group as this case rather than as an error;
 `docs/reading-the-traces.md`.
+
+### P61. The whole conversation is in CloudWatch Logs, forever, and X-Ray does not show it
+
+**Symptom.** You read your traces, see ids, model and token counts and no prompts, and conclude the agent
+records no conversation content. It records all of it.
+**Cause.** Two separate things, and you have to look at both. Strands emits the conversation as **span
+events** -- `gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message`,
+`gen_ai.tool.message`, `gen_ai.choice` -- each carrying a `content` or `message` attribute with the system
+prompt, the user prompt, the model's reasoning, tool arguments, tool results and the answer. On the
+legacy-convention path (`strands/telemetry/tracer.py`) it emits them unconditionally. Those events land in
+the **runtime log group's `spans` stream**, `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`, which
+AgentCore creates with retention **never expire**. Meanwhile ADOT's LLO handler lifts content off the span
+on the OTLP path, so the X-Ray segment documents genuinely do not carry it -- which is why looking only at
+X-Ray, or at the GenAI Observability panes, produces exactly the wrong conclusion.
+
+Measured on this repo's first deployment, over two hours: 71 spans carrying those events across the two
+runtimes, 225 events, roughly 320 KB of text. A Logs Insights count over the HTTP runtime alone reported
+57 spans and 449 KB. A single `chat` span's `gen_ai.system.message` was 3.2 KB of system prompt.
+
+**Fix.** First, measure it correctly, because there are three traps:
+
+1. Do not grep for `gen_ai.prompt` / `gen_ai.completion`. Those are the OpenLit and Traceloop attribute
+   names; Strands uses the message-event names above, and searching for the wrong ones returns nothing.
+2. The content is in the span's `events` array, not in its `attributes`. Most spans have no `events` key at
+   all, so a sample that happens to miss them reads as "no content anywhere".
+3. Two different spans are called `chat`. ADOT's botocore Bedrock span is
+   `chat <model id>` and carries `aws.remote.*`, `aws.request_id`, `rpc.*` and **no events**. Strands' own
+   span is bare `chat` and carries `session.id`, `user.id`, `harness.effort` and the content events.
+   Sampling the first one is the easiest way to get this wrong. The content is also on
+   `invoke_agent ops-investigator` and `execute_event_loop_cycle`, not only on `chat`.
+
+The query that finds them, over the runtime log group:
+
+```
+filter @logStream = 'spans' and @message like /gen_ai.user.message/ | stats count() as spans by name
+```
+
+Second, decide what you want kept. For v0.1 the control that exists is **retention**: the runtime log
+groups are created by the AgentCore platform, not by the stack, so nothing in the repo sets one and the
+default is to keep the conversation forever. Set one after the first deploy:
+
+```bash title="manual"
+aws logs put-retention-policy --log-group-name /aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT \
+  --retention-in-days 14
+```
+
+`scripts/smoke.sh` prints that command with the real group names at the end of a run. It does not run it:
+how long you keep your own logs is an operator decision, not a script's.
+
+Not a fix, and explicitly **untested here**: Strands has a redaction control,
+`OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` together with `gen_ai_unredacted_attributes`,
+but its own docstring scopes it to latest-convention span *attributes* rather than to the legacy message
+events this build emits. Verifying it needs a redeploy and a re-measurement, so it is recorded as a
+follow-up and nothing here claims it works.
+**Where in this repo.** `docs/reading-the-traces.md` (the section on what the traces carry);
+`scripts/smoke.sh` (the retention hint it prints); `CHANGELOG.md` under known gaps.

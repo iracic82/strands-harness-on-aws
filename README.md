@@ -306,6 +306,12 @@ The agent cannot write to AWS, and that is checked three times independently.
 
 In the cloud profile there are **no egress-capable tools at all**: `shell`, `web_fetch`, `web_search`,
 `write`, and `edit` are pinned off, and the programmatic tool caller may call only the three AWS tools.
+
+One thing the agent's read-only posture does **not** cover: the conversation itself is recorded. Strands
+emits the system prompt, the user prompt, the model's reasoning, tool arguments and the answer as
+`gen_ai.*.message` span events, and they land in the runtime log group with retention *never expire*. There
+is no off switch wired up in this release — set a retention policy on both runtime log groups after your
+first deploy, which `scripts/smoke.sh` prints the command for (PITFALLS P61).
 That is what makes `networkMode: PUBLIC` defensible.
 
 Identity is the JWT `sub`, taken from the `Authorization` header that the AgentCore authorizer already
@@ -375,7 +381,7 @@ in, but nothing here loads it for you: there is no dotenv dependency, so source 
 | `A2A_PUBLIC_URL` | placeholder | The A2A runtime's own invocation URL, which the agent card advertises. Written back after the first deploy |
 | `COGNITO_DISCOVERY_URL` | placeholder | The OIDC discovery document the A2A card names in its security scheme. Written by `auth_bootstrap` |
 | `OTEL_TRACES_EXPORTER` | set to `otlp` by ADOT itself | Leave it alone. ADOT sets it before your code runs; setting it to anything else makes the harness fight ADOT for the exporter and you lose your traces (PITFALLS P8, P56) |
-| `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` | unset | Not an off switch for content capture. Unset, ADOT lifts any prompt/response attributes off the span into a separate Gen AI Event log record; set to `true`, spans are exported unmodified, which would leave *more* in the trace. This agent's spans carry no message content either way, measured (PITFALLS P8, spec §10.2) |
+| `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` | unset | Not an off switch for content capture. Unset, ADOT lifts prompt/response content off the span into a separate Gen AI Event log record; set to `true`, spans are exported unmodified, which leaves *more* on the span. Either way the conversation is recorded: Strands emits it as `gen_ai.*.message` span events into the runtime log group (PITFALLS P61) |
 
 ## Tested versions
 

@@ -75,6 +75,14 @@ Initial release.
   the meantime, but not incremental artifact chunks.
 - **Locally, the A2A server on port 9000 has no authenticator.** There is no AgentCore authorizer in front
   of it, and the card correctly advertises no security scheme without a discovery URL.
+- **The runtime log groups keep the whole conversation, with no expiry, and nothing turns that off.**
+  Strands emits the system prompt, user prompt, reasoning, tool arguments and answers as `gen_ai.*.message`
+  span events into `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`, which AgentCore creates with
+  retention *never expire* (PITFALLS P61). The control this release ships is retention:
+  `scripts/smoke.sh` prints the `aws logs put-retention-policy` command with the real group names. Strands'
+  redaction switch (`OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` with
+  `gen_ai_unredacted_attributes`) is scoped by its own docstring to latest-convention span attributes
+  rather than these legacy events, is **untested here**, and is a follow-up for the next release.
 
 ### Notes
 

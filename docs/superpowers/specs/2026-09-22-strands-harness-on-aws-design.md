@@ -353,27 +353,30 @@ Resolved against a real deployment in `us-west-2` on 2026-09-22 (the first cloud
    the actor from the token and never fell back. What the spec did not anticipate is that AgentCore drops
    every header *not* named, which broke A2A outright until `A2A-Version` was added to the A2A runtime's
    list. See PITFALLS P52.
-2. **ADOT content capture — measured, and it is not a switch you flip.** No prompt or completion content
-   reaches the traces, which is what `docs/reading-the-traces.md` always claimed; this run turns that from
-   an assumption into a measurement. All 14 `chat global.anthropic.claude-sonnet-4-6` spans in the runtime's
-   own `spans` log stream carry only `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`,
-   `gen_ai.request.max_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.system` and the two
-   `gen_ai.usage.*_tokens` counts; they carry no span events, and the strings `gen_ai.prompt` and
-   `gen_ai.completion` appear nowhere in the runtime log group.
+2. **ADOT content capture — the conversation is recorded, in CloudWatch Logs.** Strands records the
+   conversation as span events: `gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message`,
+   `gen_ai.tool.message` and `gen_ai.choice`, carrying the system prompt, the user prompt, the model's
+   reasoning, tool arguments, tool results and the answer. They land in the runtime log group's `spans`
+   stream, which AgentCore creates with retention **never expire**. X-Ray segment documents do not show
+   them because ADOT's LLO handler lifts content off the span on the OTLP path; the content is in
+   CloudWatch Logs, not in X-Ray. Measured over two hours on this deployment: 71 spans carrying those
+   events across the two runtimes, 225 events, about 320 KB of text; a Logs Insights count over the HTTP
+   runtime alone reported 57 spans and 449 KB.
 
-   The mechanism matters, because the obvious control does the opposite of what its name suggests.
-   `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` does not decide whether content is recorded, only where it lands.
-   In `aws-opentelemetry-distro` 0.18.0, `OTLPAwsSpanExporter.export` runs ADOT's `LLOHandler` when agent
-   observability is on **and** the flag is *not* set; that handler lifts any prompt/completion attributes off
-   the span into a separate Gen AI Event log record and strips them from the span. Setting the flag to
-   `"true"` skips the handler and exports spans unmodified — so it is a routing switch, and if content were
-   present, opting "out" would leave more of it in the trace. What governs recording is
-   `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` (ADOT sets it to `true`), which the OpenTelemetry
-   GenAI instrumentations read; the spans this agent emits simply do not carry message content.
+   The mechanism established earlier still holds and is worth keeping: `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT`
+   is a routing switch, not an off switch. In `aws-opentelemetry-distro` 0.18.0, `OTLPAwsSpanExporter.export`
+   runs ADOT's `LLOHandler` only when agent observability is on **and** the flag is unset; the handler lifts
+   content off the span into a consolidated Gen AI Event log record. Setting it to `"true"` skips the handler
+   and exports spans unmodified, which puts more on the span, not less. The distro also `setdefault`s
+   `OTEL_TRACES_EXPORTER=otlp` and `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`.
 
-   So the repo needs no change here, but the claim in the docs is now evidence-backed and carries the caveat
-   that it is a property of what is instrumented, not something this repo enforces. Related: ADOT also sets
-   `OTEL_TRACES_EXPORTER` itself (PITFALLS P56).
+   Strands' own redaction control is `OTEL_SEMCONV_STABILITY_OPT_IN` (`gen_ai_latest_experimental` with
+   `gen_ai_unredacted_attributes`), which by its docstring governs latest-convention span *attributes*, not
+   the legacy message events this build emits. **Untested here**, and a follow-up rather than a shipped
+   control: it needs a redeploy and a re-measurement. For v0.1 the control that exists is retention —
+   `aws logs put-retention-policy` on both runtime log groups after the first deploy, which
+   `scripts/smoke.sh` now prints with the real group names. See PITFALLS P61.
+
 3. **`a2a-sdk` 1.x alongside `strands-agents` — confirmed, no conflict.** `uv.lock` resolves `a2a-sdk`
    1.1.5 with `strands-agents[otel]` 1.56.0, and both images built and ran with that lock.
 4. **Log-group retention — manual, and there is no CDK context key for the part that matters.** The two

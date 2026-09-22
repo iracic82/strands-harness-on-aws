@@ -88,23 +88,37 @@ a turn a subagent actually consumed.
 The `reader` subagent overrides these with `session.id` plus `agent.role: "reader"`, so a subagent's spans
 are distinguishable from its parent's without reading the tree structure.
 
-Notice what is not there. No prompt, no response, no tool arguments, no tool output — and that is measured,
-not assumed. Every `chat global.anthropic.claude-sonnet-4-6` span this deployment produced carries
-`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens`,
-`gen_ai.response.finish_reasons`, `gen_ai.system`, `gen_ai.provider.name` and the two
-`gen_ai.usage.*_tokens` counts, and nothing else content-shaped. The spans carry no span events, and the
-strings `gen_ai.prompt` and `gen_ai.completion` do not appear anywhere in the runtime's log group.
+### The conversation is recorded, and it is not in X-Ray
 
-One thing to understand before you reach for a switch, because the obvious one is not an off switch.
-`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` does not control whether content is *recorded*; it controls where it
-*goes*. Unset (the default), the AWS OTLP span exporter runs ADOT's LLO handler, which lifts any
-prompt/completion attributes off the span into a separate Gen AI Event log record and strips them from the
-span. Set to `true`, that handler is skipped and spans are exported unmodified — so if content were being
-recorded, opting "out" would leave **more** of it in the trace, not less. What actually decides whether
-content is recorded at all is the instrumentation: `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
-(which ADOT sets to `true`) governs the OpenTelemetry GenAI instrumentations, and this repo's spans simply
-do not carry message content. Treat "no content in the traces" as a property of what is instrumented here,
-not as a guarantee this repo enforces.
+**Strands records the conversation as span events** — `gen_ai.system.message`, `gen_ai.user.message`,
+`gen_ai.assistant.message`, `gen_ai.tool.message` and `gen_ai.choice`: the system prompt, the user prompt,
+the model's reasoning, tool arguments, tool results and the answer. They land in the **runtime log group's
+`spans` stream**, which AgentCore creates with retention **never expire**. X-Ray segment documents do not
+show them, because ADOT's LLO handler lifts content off the span on the OTLP path — so the content is in
+CloudWatch Logs, not in X-Ray. Looking only at X-Ray is what makes a reader conclude there is none.
+
+The attribute table above is what is on the span. The conversation is in the events beside it. Measured on
+this deployment over two hours: 71 spans carrying those events across the two runtimes, 225 events, about
+320 KB of prompt, reasoning, tool-argument and answer text. A single `chat` span's
+`gen_ai.system.message` was 3.2 KB of system prompt. PITFALLS P61 has the measurement method, including
+the two traps that make it easy to miss.
+
+Read them with Logs Insights over the runtime log group:
+
+```
+filter @logStream = 'spans' and @message like /gen_ai.user.message/ | stats count() as spans by name
+```
+
+There is no off switch wired up in this repo. Do not reach for
+`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT`: it does not control whether content is *recorded*, only where it
+*goes*. Unset (the default), the AWS OTLP span exporter runs ADOT's LLO handler, which lifts content off
+the span into a consolidated Gen AI Event log record. Set to `true`, that handler is skipped and spans are
+exported unmodified — so opting "out" leaves **more** content on the span, not less. Strands' own
+redaction control is `OTEL_SEMCONV_STABILITY_OPT_IN` (`gen_ai_latest_experimental` plus
+`gen_ai_unredacted_attributes`), and by its own docstring it governs the *latest-convention span
+attributes*, not the legacy message events above. **That path is untested here** — it needs a redeploy and
+a re-measurement — so treat it as a follow-up, not as a setting you can rely on. For v0.1 the practical
+control is retention: set one on both runtime log groups after the first deploy (P61).
 
 The `user_agent_extra` on every boto3 client (`strands-harness-on-aws session=<id> actor=<id>`, set in
 `tools/_clients.py:client_config`) puts the same two ids into CloudTrail, so a trace and an API call log
