@@ -198,13 +198,13 @@ def test_credentials_failure_short_circuits_and_reports_profile(monkeypatch):
 
 
 def test_credentials_pass_reports_account_arn_and_profile(monkeypatch):
-    monkeypatch.setenv("AWS_PROFILE", "my-profile")
+    monkeypatch.setenv("AWS_PROFILE", "sso-profile")  # not the owner's real profile name; see test_repo_hygiene
     checks = doctor.run("us-west-2", "m", "s", clients=_clients(), which=_tools(), run_cmd=_run_ok)
     c = next(c for c in checks if c.name == "credentials")
     assert c.status == "PASS"
     assert "account=1" in c.detail
     assert "arn=arn:aws:sts::1:assumed-role/x/y" in c.detail
-    assert "profile=my-profile" in c.detail
+    assert "profile=sso-profile" in c.detail
 
 
 def test_python_check_notes_tested_versions():

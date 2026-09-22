@@ -16,3 +16,8 @@ agentcore/cdk/node_modules/
 agentcore/aws-targets.json
 agentcore/.cli/
 agentcore/.env.local
+
+# Agent working files: task briefs, review diffs, and the progress ledger. They quote the owner's
+# account, and .superpowers/sdd/.gitignore is not itself tracked, so the rule lives here too.
+.superpowers/
+

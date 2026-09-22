@@ -35,9 +35,14 @@ Initial release.
 - **In-container preflight** logged to CloudWatch, with `/ping` reporting busy when a hard check fails.
 - **CloudWatch GenAI Observability** through ADOT, with `session.id`, `user.id`, `gen_ai.request.model`,
   and `harness.effort` on every span, and metadata-only capture.
-- **Operator scripts**: `invoke.py` (three transports, SSE rendering), `get_token.py`, `a2a_client.py`,
+- **Operator scripts**: `setup.py` (`make setup`: account detection and the two git-ignored files a fresh
+  clone needs), `invoke.py` (three transports, SSE rendering), `get_token.py`, `a2a_client.py`,
   `memory_wipe.py`, `demo.sh` (the two-session memory demo), and `smoke.sh` (the full owner-run
   end-to-end check).
+- **A public-repo hygiene gate**: `make hygiene` fails on an account id, an ARN, a Cognito pool id, or a
+  `/Users/` path in any tracked file, and on a generated file that is tracked rather than ignored.
+  gitleaks runs beside it, in CI and as a pre-commit hook, and a `fresh-clone` CI job proves the clone
+  runs with nothing but the repo.
 - **Two arm64 images** built by the generated CDK stack on a native ARM CodeBuild host, from a
   digest-pinned base.
 - **CI** on Python 3.12 and 3.14: ruff, pytest, and an arm64 buildx build of both images. 265 tests, no
@@ -82,5 +87,5 @@ Initial release.
   entitled separately and was refused on the account this was built against. See PITFALLS P29.
 - Cost figures in the README (≈ $1 per turn, ≈ $5 per demo, ≈ $8 hard cap) are estimates and have not been
   reconciled against an invoice.
-- `make setup` is a placeholder that prints the one file to copy and exits non-zero. Account detection
-  lands in a follow-up.
+- `make setup` detects the account and region and writes `agentcore/aws-targets.json` and `.env`. Neither
+  is committed; `make hygiene` (gitleaks plus `tests/test_repo_hygiene.py`) is what keeps it that way.

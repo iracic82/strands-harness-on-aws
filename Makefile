@@ -12,13 +12,12 @@ REGION_ENV = AWS_REGION=$(REGION) AWS_DEFAULT_REGION=$(REGION)
 # some machines, and the CLI finds the project by walking into ./agentcore on its own.
 AGENTCORE = npx -y @aws/agentcore@0.30.0
 
-.PHONY: setup doctor auth-bootstrap token dev invoke test lint plan deploy status logs a2a-card memory-wipe smoke destroy
+.PHONY: setup doctor auth-bootstrap token dev invoke test lint hygiene plan deploy status logs a2a-card memory-wipe smoke destroy
 
+# The first command in a fresh clone: asks STS who you are and writes the two git-ignored files that
+# carry your account id (agentcore/aws-targets.json and .env). Idempotent; --force overwrites edits.
 setup:
-	@echo "make setup is not implemented yet (Task 17): it will detect your account and region and write" >&2
-	@echo "agentcore/aws-targets.json and .env for you. Until then, copy agentcore/aws-targets.example.json" >&2
-	@echo "to agentcore/aws-targets.json and put your own account id in it." >&2
-	@exit 1
+	uv run python scripts/setup.py --region $(REGION)
 
 doctor:
 	uv run python doctor.py --region $(REGION)
@@ -44,8 +43,19 @@ invoke:
 test:
 	uv run pytest
 
-lint:
+lint: hygiene
 	uv run ruff check . && uv run ruff format --check .
+
+# The public-repo gate: no account id, ARN, Cognito id, or /Users path in a tracked file, and every
+# file that would carry one is git-ignored. Written as an `if` and not `cmd && gitleaks || echo`,
+# because in that form a real leak exits non-zero, falls into the `||`, and the target passes.
+hygiene:
+	uv run pytest tests/test_repo_hygiene.py -q
+	@if command -v gitleaks >/dev/null; then \
+		gitleaks detect --no-banner --source .; \
+	else \
+		echo "gitleaks not installed (brew install gitleaks); the secrets CI job runs it"; \
+	fi
 
 plan:
 	$(AGENTCORE) deploy --dry-run

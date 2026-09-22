@@ -17,7 +17,7 @@ from botocore.awsrequest import AWSRequest
 from ops_investigator import sse
 from ops_investigator.runtime_common import MIN_SESSION_LEN
 
-from scripts import auth_bootstrap, invoke, memory_wipe
+from scripts import auth_bootstrap, invoke, memory_wipe, setup
 from scripts.a2a_client import card_protocol_version, card_url_for, summarize_event
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +101,99 @@ def test_bootstrap_needs_a_password(capsys):
     with pytest.raises(SystemExit):
         auth_bootstrap.main(["--region", "us-west-2", "--password", ""])
     assert "DEMO_PASSWORD" in capsys.readouterr().err
+
+
+# --- setup ------------------------------------------------------------------------------------------
+
+# The placeholder account, and the only 12-digit number the repo-hygiene gate allows in a tracked file.
+EXAMPLE_ACCOUNT = "123456789012"
+
+
+class FakeSts:
+    """The one call setup.py makes: who am I, and in which account."""
+
+    def get_caller_identity(self) -> dict:
+        return {"Account": EXAMPLE_ACCOUNT, "Arn": f"arn:aws:sts::{EXAMPLE_ACCOUNT}:assumed-role/Admin/igor"}
+
+
+@pytest.fixture
+def generated(tmp_path, monkeypatch) -> SimpleNamespace:
+    """setup.py pointed at a throwaway directory, with STS faked and the profile's region empty."""
+    targets, env = tmp_path / "aws-targets.json", tmp_path / ".env"
+    monkeypatch.setattr(setup, "TARGETS", targets)
+    monkeypatch.setattr(setup, "ENV", env)
+    monkeypatch.setattr(
+        setup,
+        "boto3",
+        SimpleNamespace(
+            client=lambda *args, **kwargs: FakeSts(),
+            session=SimpleNamespace(Session=lambda: SimpleNamespace(region_name=None)),
+        ),
+    )
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    return SimpleNamespace(targets=targets, env=env)
+
+
+def test_setup_writes_both_generated_files_for_the_detected_account(generated, capsys):
+    assert setup.main(["--region", "eu-west-1"]) == 0
+
+    targets = json.loads(generated.targets.read_text())
+    assert [(t["account"], t["region"]) for t in targets] == [(EXAMPLE_ACCOUNT, "eu-west-1")]
+    # The example's description tells you to copy the file; the generated one says where it came from.
+    assert all("setup.py" in t["description"] for t in targets)
+
+    env = generated.env.read_text()
+    assert "AWS_REGION=eu-west-1" in env and "AWS_DEFAULT_REGION=eu-west-1" in env
+    assert f"AWS_ACCOUNT_ID={EXAMPLE_ACCOUNT}" in env
+    assert "<region>" not in env and "<account-id>" not in env
+
+    out = capsys.readouterr().out
+    assert "written" in out and f"account={EXAMPLE_ACCOUNT} region=eu-west-1 caller=igor" in out
+    assert out.rstrip().endswith("next: make doctor")
+
+
+def test_setup_is_idempotent_and_never_clobbers_an_edit(generated, capsys):
+    setup.main(["--region", "us-west-2"])
+    capsys.readouterr()
+
+    assert setup.main(["--region", "us-west-2"]) == 0
+    assert "unchanged" in capsys.readouterr().out
+
+    generated.env.write_text("AWS_REGION=my-own-thing\n")
+    assert setup.main(["--region", "us-west-2"]) == 0
+    assert "kept" in capsys.readouterr().out
+    assert generated.env.read_text() == "AWS_REGION=my-own-thing\n"
+
+    assert setup.main(["--region", "us-west-2", "--force"]) == 0
+    assert "written" in capsys.readouterr().out
+    assert "AWS_REGION=us-west-2" in generated.env.read_text()
+
+
+def test_detect_region_prefers_the_flag_then_the_environment_then_the_profile(monkeypatch):
+    profile = SimpleNamespace(session=SimpleNamespace(Session=lambda: SimpleNamespace(region_name="sa-east-1")))
+    monkeypatch.setattr(setup, "boto3", profile)
+    monkeypatch.setenv("AWS_REGION", "eu-west-2")
+    assert setup.detect_region("ap-south-1") == "ap-south-1"
+    assert setup.detect_region(None) == "eu-west-2"
+    monkeypatch.delenv("AWS_REGION")
+    assert setup.detect_region(None) == "sa-east-1"
+
+
+def test_reset_placeholders_delegates_to_auth_bootstrap_and_calls_no_aws(monkeypatch, capsys):
+    """One copy of the placeholder spellings. `setup.py` is the command people remember, not a second
+    set of regexes -- and putting a file back must not need credentials."""
+    seen: list[Path] = []
+
+    def fake_reset(path: Path) -> list[str]:
+        seen.append(path)
+        return ["OpsInvestigator", "OpsInvestigatorA2A"]
+
+    monkeypatch.setattr(setup.auth_bootstrap, "reset_placeholders", fake_reset)
+    monkeypatch.setattr(setup, "boto3", None)  # any AWS call would raise AttributeError
+
+    assert setup.main(["--reset-placeholders"]) == 0
+    assert seen == [auth_bootstrap.CONFIG]
+    assert "OpsInvestigator, OpsInvestigatorA2A" in capsys.readouterr().out
 
 
 # --- invoke -----------------------------------------------------------------------------------------

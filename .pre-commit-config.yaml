@@ -1,0 +1,19 @@
+# Optional, and the same checks CI runs, so nothing here is a surprise at push time:
+#
+#     uv tool install pre-commit && pre-commit install
+#
+# The repo-hygiene test is deliberately not a hook: it needs the whole tracked tree, which is what
+# `make hygiene` (and the `test` CI job) is for. These three hooks are the fast, staged-diff ones.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
+    hooks:
+      # No --fix: these mirror `make lint`, which reports rather than rewrites.
+      - id: ruff-check
+      - id: ruff-format
+        args: [--check]

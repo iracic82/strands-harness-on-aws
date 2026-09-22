@@ -1,0 +1,6 @@
+# The design history (the spec, the plan, every task brief) is kept in the repo for provenance, and it
+# names the account this was built against. `export-ignore` keeps it out of `git archive`, which is what
+# GitHub's release tarball and "Download ZIP" are built from. The repo-hygiene test allowlists the same
+# two paths, so nothing else may carry account-specific values. See tests/test_repo_hygiene.py.
+docs/superpowers export-ignore
+.superpowers export-ignore

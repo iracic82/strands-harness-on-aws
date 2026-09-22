@@ -32,6 +32,37 @@ jobs:
       # TODO(Task 16): scripts/verify_docs.py does not exist yet. Uncomment once it lands.
       # - run: uv run python scripts/verify_docs.py
 
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: gitleaks scans every commit, and a secret removed in the tip commit is still
+      # a secret. Shallow clones silently reduce that to one commit.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No GITLEAKS_LICENSE: the action is free for public repositories. The job summary is the
+          # one feature that calls the licensing API, so it stays off.
+          GITLEAKS_ENABLE_SUMMARY: false
+
+  # The promise the README makes -- clone it and it runs -- tested the only way it can be: from a
+  # clone, not from the checkout, so a file that exists only on somebody's laptop fails here.
+  fresh-clone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install "3.12"
+      - name: clone the checkout and run the suite from the clone
+        run: |
+          git clone --depth 1 "$GITHUB_WORKSPACE" /tmp/fresh
+          cd /tmp/fresh
+          uv sync --frozen --python "3.12"
+          uv run pytest -q
+          uv run python doctor.py --help
+
   images:
     runs-on: ubuntu-latest
     steps:

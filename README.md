@@ -29,14 +29,18 @@ export AWS_PROFILE=<your-profile>      # naming the profile explicitly is not op
 export AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2   # both, see PITFALLS P28
 ```
 
-```bash
-cp agentcore/aws-targets.example.json agentcore/aws-targets.json   # put your own account id in it
+```bash title="manual"
+make setup     # asks STS who you are, writes agentcore/aws-targets.json and .env
 make doctor    # 14 checks; every FAIL prints the fix
 ```
 
-`agentcore/aws-targets.json` is git-ignored, because it carries your account id. `make setup`, a follow-up
-task, will detect the account and region and write that file for you; today it prints the copy above and
-exits non-zero, so nobody mistakes it for having run.
+`make setup` is the only thing standing between a fresh clone and a working one. It calls STS for your
+account id, takes the region from `--region` / `AWS_REGION` / your profile, and writes
+`agentcore/aws-targets.json` (from the committed `aws-targets.example.json`) and `.env` (from
+`.env.example`). Both files are git-ignored, because both carry your account id, and nothing
+account-specific is committed here -- `make hygiene` is the test that keeps it that way. Setup is
+idempotent: run it as often as you like, and a file you have edited yourself is reported and kept unless
+you pass `--force`.
 
 `make doctor` is the whole point of the repo in one command. It checks your Python, uv, Node, and CLI, then
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,
@@ -130,6 +134,11 @@ discovery URL, a real client id, and an A2A URL that contains your account id in
 ```bash
 git checkout agentcore/agentcore.json
 ```
+
+`uv run python scripts/setup.py --reset-placeholders` does the same to the values without touching the
+CLI's original whitespace, which is what you want when the file has other local edits you are keeping.
+Either way, `make hygiene` is the check: it fails on a real Cognito pool id, an account id, an ARN, or a
+`/Users/` path in any tracked file, and it runs as part of `make lint`.
 
 ## The demo
 
@@ -331,6 +340,9 @@ Read in this order:
 
 Every knob is an environment variable. On the deployed runtimes they live in `envVars` in
 `agentcore/agentcore.json`, so changing one needs a `make deploy` but not a rebuild. Locally, export them.
+`make setup` writes a git-ignored `.env` from `.env.example` with your region and account already filled
+in, but nothing here loads it for you: there is no dotenv dependency, so source it yourself with
+`set -a; . ./.env; set +a` when you want it.
 
 | Variable | Default | What it does |
 |---|---|---|
