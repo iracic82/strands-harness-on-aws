@@ -138,7 +138,7 @@ class FramePrinter:
                 f"[tool_result] {frame.get('name', '')} status={frame.get('status', '')} bytes={frame.get('bytes', 0)}"
             )
         if type_ == "denied":
-            return f"[denied] {frame.get('name', '')}: {frame.get('reason', frame.get('message', ''))}"
+            return f"[denied] {frame.get('tool', '')}: {frame.get('reason', frame.get('message', ''))}"
         if type_ == "error":
             return f"[error] {frame.get('message', '')} (hint: {frame.get('hint', '')})"
         fields = {k: v for k, v in frame.items() if k not in ("v", "type")}

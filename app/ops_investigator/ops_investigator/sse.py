@@ -90,7 +90,8 @@ class EventMapper:
         """An intervention (`ReadOnlyGuard`) denied the call before it ran: the SDK yields
         `ToolCancelEvent` followed by an error `tool_result` for the same toolUseId. Emit exactly one
         `denied` frame per toolUseId; the following `tool_result` is still mapped normally (it just
-        carries `status="error"` like any other failed call).
+        carries `status="error"` like any other failed call). Dedup is skipped when `toolUseId` is
+        missing, same as `_emitted` in `_map_tool_use_stream`: there is nothing to key a repeat on.
         """
         tc = event.get("tool_cancel_event")
         tc = tc if isinstance(tc, dict) else {}

@@ -14,6 +14,7 @@ from typing import Any
 import botocore
 import pytest
 from botocore.awsrequest import AWSRequest
+from ops_investigator import sse
 from ops_investigator.runtime_common import MIN_SESSION_LEN
 
 from scripts import auth_bootstrap, invoke, memory_wipe
@@ -142,7 +143,7 @@ def test_frame_printer_renders_every_v1_frame_type():
         {"v": 1, "type": "text", "delta": "the account."},
         {"v": 1, "type": "tool_use", "name": "aws_call", "input_keys": ["operation", "service"]},
         {"v": 1, "type": "tool_result", "name": "aws_call", "status": "success", "bytes": 42},
-        {"v": 1, "type": "denied", "name": "shell", "reason": "read-only"},
+        {"v": 1, "type": "denied", "tool": "shell", "reason": "read-only"},
         {"v": 1, "type": "metrics", "input_tokens": 10, "output_tokens": 2, "est_usd": 0.001},
         {"v": 1, "type": "error", "message": "boom", "hint": "see the logs"},
         {"v": 1, "type": "done"},
@@ -159,6 +160,23 @@ def test_frame_printer_renders_every_v1_frame_type():
         "[error] boom (hint: see the logs)",
     ]
     assert printer.done and printer.errors == 1
+
+
+def test_frame_printer_renders_a_real_denied_frame_from_the_sse_mapper():
+    """Regression: `_line` once read `frame['name']` for a `denied` frame, but `sse.EventMapper` emits
+    `tool`, so every pretty-printed denial showed a blank tool name. Route an actual mapped
+    `tool_cancel_event` (the real SDK shape) through `FramePrinter.render`, not a hand-built fixture."""
+    ev = {
+        "tool_cancel_event": {
+            "tool_use": {"toolUseId": "t1", "name": "aws_call"},
+            "message": "DENIED: read-only: ec2:terminate_instances is not a permitted read operation",
+        }
+    }
+    frame = sse.map_event(ev)
+    printer = invoke.FramePrinter()
+    line = printer.render(frame) + printer.finish()
+    assert "aws_call" in line
+    assert "DENIED: read-only: ec2:terminate_instances is not a permitted read operation" in line
 
 
 def test_frame_printer_raw_mode_and_unknown_types():
