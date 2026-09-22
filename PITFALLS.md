@@ -34,7 +34,8 @@ generates a real CDK project you own. Both install a binary called `agentcore`.
 **Fix.** Use only the npm CLI, pinned, through `npx`, from the repo root. Never install the Python one.
 **Where in this repo.** `Makefile` (the `AGENTCORE = npx -y @aws/agentcore@0.30.0` variable, used by every
 target); `doctor.py:_agentcore_cli_check` detects the deprecated toolkit by its Click-style usage banner
-and FAILs with the uninstall command. Pinned by `tests/test_scripts.py::test_makefile_only_reaches_the_agentcore_cli_through_npx_from_the_repo_root`.
+and WARNs with the uninstall command -- a WARN and not a FAIL, because `npx` makes PATH irrelevant, so a
+shadowed or missing global CLI stops nothing here. Pinned by `tests/test_scripts.py::test_makefile_only_reaches_the_agentcore_cli_through_npx_from_the_repo_root`.
 
 ### P16. AgentCore Runtime is arm64 only
 

@@ -158,15 +158,28 @@ def _node_check(which: Callable[[str], str | None]) -> Check:
 
 
 def _agentcore_cli_check(run_cmd: Callable[..., subprocess.CompletedProcess[str]]) -> Check:
+    """Neither outcome here is fatal, because nothing in this repo calls a global `agentcore`.
+
+    Every Makefile target and script goes through `npx -y @aws/agentcore@0.30.0`, which fetches the
+    pinned version on demand -- that indirection exists precisely because the deprecated Python starter
+    toolkit installs a binary of the same name and shadows the npm one (P1/P20). So a missing global CLI
+    and a shadowing one are both WARN: worth telling you about, not worth stopping for. `node` is the
+    check that fails when `npx` itself is unavailable.
+    """
     code, text = _cmd(run_cmd, ["agentcore", "--version"])
     if code != 0:
-        return Check("agentcore_cli", "FAIL", "agentcore not found", "npm install -g @aws/agentcore")
+        return Check(
+            "agentcore_cli",
+            "WARN",
+            "not on PATH; make targets use npx",
+            "optional: npm install -g @aws/agentcore",
+        )
     if "Usage: agentcore [OPTIONS]" in text:  # the deprecated Python starter toolkit prints Click-style usage (P1/P20)
         return Check(
             "agentcore_cli",
-            "FAIL",
+            "WARN",
             "deprecated Python starter toolkit is first on PATH",
-            "pip uninstall bedrock-agentcore-starter-toolkit; npm install -g @aws/agentcore",
+            "pip uninstall bedrock-agentcore-starter-toolkit, or ignore: make targets use npx",
         )
     return Check("agentcore_cli", "PASS", text.strip().splitlines()[0][:40], "")
 

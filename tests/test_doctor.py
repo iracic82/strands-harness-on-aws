@@ -179,7 +179,28 @@ def test_old_python_toolkit_detected():
 
     checks = doctor.run("us-west-2", "m", "s", clients=_clients(), which=_tools(), run_cmd=run_cmd)
     c = next(c for c in checks if c.name == "agentcore_cli")
-    assert c.status == "FAIL" and "npm install -g @aws/agentcore" in c.fix
+    # WARN, not FAIL: every target in this repo reaches the CLI through `npx -y @aws/agentcore@0.30.0`,
+    # which is immune to whatever shadows the name on PATH. Telling you is useful; stopping you is not.
+    assert c.status == "WARN" and "pip uninstall bedrock-agentcore-starter-toolkit" in c.fix
+    assert "make targets use npx" in c.fix
+
+
+def test_missing_global_cli_is_a_warning_not_a_failure():
+    """`npx -y @aws/agentcore@0.30.0` is how every target in this repo reaches the CLI, so a machine
+    without a global install runs everything. Failing here would stop a working setup at the door."""
+
+    def run_cmd(args, **k):
+        from types import SimpleNamespace
+
+        if args[:2] == ["agentcore", "--version"]:
+            return SimpleNamespace(returncode=127, stdout="", stderr="command not found")
+        return _run_ok(args, **k)
+
+    checks = doctor.run("us-west-2", "m", "s", clients=_clients(), which=_tools(), run_cmd=run_cmd)
+    c = next(c for c in checks if c.name == "agentcore_cli")
+    assert c.status == "WARN"
+    assert "npx" in c.detail and c.fix.startswith("optional:")
+    assert doctor.worst(checks) == 1  # a WARN, so the quickstart's `make setup && make doctor` goes on
 
 
 def test_credentials_failure_short_circuits_and_reports_profile(monkeypatch):
