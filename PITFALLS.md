@@ -1,8 +1,8 @@
 # PITFALLS
 
-Fifty numbered traps between a Strands harness agent that works on your laptop and one that works on
+Fifty-one numbered traps between a Strands harness agent that works on your laptop and one that works on
 Amazon Bedrock AgentCore. P1 to P27 were found while designing this repo and are fixed in its code. P28 to
-P50 were found while building it, which is to say the hard way.
+P51 were found while building it, which is to say the hard way.
 
 Every entry has the same four fields. **Where in this repo** names the file and function that handles it,
 so you can read the fix rather than trust this page.
@@ -16,7 +16,7 @@ Verified 2026-09-22 against `strands-harness` 0.1.1, `strands-agents` 1.56.0, `b
 - [Region, models, and access](#region-models-and-access): P5, P6, P7, P17, P25, P28, P29, P30
 - [State, memory, and sessions](#state-memory-and-sessions): P2, P3, P14, P23, P27, P37, P42, P43, P48
 - [Tools and the agent loop](#tools-and-the-agent-loop): P4, P10, P11, P12, P13, P19, P21, P33, P34, P50
-- [Runtime, streaming, and protocols](#runtime-streaming-and-protocols): P9, P22, P24, P35, P36, P40, P41, P45, P46
+- [Runtime, streaming, and protocols](#runtime-streaming-and-protocols): P9, P22, P24, P35, P36, P40, P41, P45, P46, P51
 - [Security and IAM](#security-and-iam): P15, P26, P31, P32
 - [Observability and operations](#observability-and-operations): P8, P38, P49
 
@@ -473,13 +473,14 @@ correct here and a second verification would only add a JWKS dependency.
 **Symptom.** Your SSE mapper emits a dozen `tool_use` frames for one tool call, each with garbage input,
 and every `tool_result` frame has an empty name.
 **Cause.** `current_tool_use.input` arrives as a *growing JSON string*, one event per delta, not as a dict.
-And the tool result event carries `toolUseId`, `status`, and `content`, but no tool name.
+And a `ToolResult` carries `toolUseId`, `status`, and `content`, but no tool name.
 **Fix.** Make the mapper stateful for the length of a turn: keep a `toolUseId -> name` map so results can
 be named, and emit exactly one `tool_use` frame per call, the first time its input parses as a complete
 JSON object.
 **Where in this repo.** `sse.EventMapper` (one instance per turn, created in `http_app._turn`). Pinned by
 `tests/test_sse.py::test_streaming_tool_use_input_string_and_tool_result_name_resolution` and
-`tests/test_http_app.py::test_invoke_uses_one_event_mapper_per_turn`.
+`tests/test_http_app.py::test_invoke_uses_one_event_mapper_per_turn`. The name map is the fallback rather
+than the usual path now: results reach the mapper from the after-tool hook (P51), which knows the name.
 
 ### P36. A timeout that spans a `yield` fires at the consumer, not at you
 
@@ -548,6 +549,24 @@ expects anyway.
 fetched so the SDK does not resolve it a second time and guess differently.
 **Where in this repo.** `scripts/a2a_client.py:card_url_for`. Pinned by
 `tests/test_scripts.py::test_card_url_puts_the_well_known_path_on_the_path_not_the_query`.
+
+### P51. `stream_async` never yields a tool result, so build the frame from `AfterToolCallEvent`
+
+**Symptom.** Your SSE stream shows `tool_use` and then text, and the `tool_result` frame your mapper
+handles never appears. The mapper branch for it is dead code and nothing tells you.
+**Cause.** In `strands-agents` 1.56 `ToolResultEvent.is_callback_event` is `False`, so the agent loop
+consumes it and never hands it to a `stream_async` consumer. A real tool-calling turn yields
+`tool_use_stream`, `data`, and `result` events, and nothing else. `tool_cancel_event` *is* a callback event
+(P35's sibling, the `denied` frame), which makes the absence of the result easy to miss.
+**Fix.** Take tool results from the hook system instead: a `HookProvider` that subscribes to
+`AfterToolCallEvent` fires for every finished call, successful or not, with both the `ToolUse` (so you get
+the name) and the `ToolResult`. Buffer them and drain the buffer between stream events, so the frame still
+lands in the order a reader expects.
+**Where in this repo.** `tool_events.ToolResultRecorder`, passed to `create_harness(hooks=[...])` in
+`agent.build_agent`/`build_reader` and attached to the returned agent; drained by `http_app._turn` and
+(to bound its growth on a cached agent, since A2A publishes one text artifact) by `a2a_app._text_chunks`.
+Pinned by `tests/test_tool_events.py` and
+`tests/test_http_app.py::test_invoke_emits_a_tool_result_frame_from_the_after_tool_hook`.
 
 ---
 

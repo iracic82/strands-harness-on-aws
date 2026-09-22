@@ -118,21 +118,25 @@ This is account 123456789012 in us-west-2.
 [metrics] {"cache_read_tokens": 0, "cycles": 2, "est_usd": 0.0126, "input_tokens": 3184, "output_tokens": 210, "stop_reason": "end_turn"}
 ```
 
-Three things about these frames are worth knowing before you build a client on them.
+Four things about these frames are worth knowing before you build a client on them.
 
 **`input_keys`, not input.** A `tool_use` frame reports which keys the tool was called with and never
 their values. A prompt-injected argument cannot leak through telemetry it never enters.
 
-**`bytes`, not content.** A `tool_result` frame reports the size of what came back, its status, and the
-tool's name. The name is resolved from the mapper's `toolUseId` map, because the underlying event does not
-carry one (P35).
+**`bytes`, not content, and it comes from a hook.** A `tool_result` frame reports the size of what came
+back, its status, and the tool's name. It is not mapped from a stream event, because there is no such
+event: `ToolResultEvent` is not a callback event, so `stream_async` never yields one (P51).
+`tool_events.ToolResultRecorder` records every finished call from the SDK's `AfterToolCallEvent` hook, and
+`http_app._turn` drains that buffer between stream events — so the frame lands right after the `tool_use`
+frame for the same call, and before whatever the model said next.
 
-**`denied{tool, reason}`, not just an error `tool_result`.** A `ReadOnlyGuard` refusal produces a
-`tool_use` frame, then a `denied` frame, then the usual `tool_result` frame with `status=error`. The
+**`denied{tool, reason}`, then an error `tool_result`.** A `ReadOnlyGuard` refusal produces a `tool_use`
+frame, then a `denied` frame, then a `tool_result` frame with `status=error` for the same call. The
 `denied` frame is sourced from the SDK's `tool_cancel_event` — the event `ToolExecutor._stream` yields
-between the intervention's `Deny` and the error `tool_result` it synthesises for the same call — mapped by
+between the intervention's `Deny` and the error `ToolResult` it synthesises — mapped by
 `sse.EventMapper._map_tool_cancel`, with `reason` truncated to 300 characters and deduplicated per
-`toolUseId`. `scripts/invoke.py` renders it as `[denied] <tool>: <reason>`.
+`toolUseId`. `scripts/invoke.py` renders it as `[denied] <tool>: <reason>`. A successful call has no
+`denied` frame in between: it is `tool_use`, then `tool_result` with `status=success`.
 
 **`est_usd` can be `null`.** `sse.estimate_usd` matches the model id against a small price table of
 `sonnet`, `opus`, and `haiku`. A model outside those families logs a warning and reports `null` rather

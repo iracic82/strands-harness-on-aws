@@ -65,4 +65,4 @@ If you knew your way around the lab, this is the shortest path to knowing your w
 4. `doctor.py`. Standalone and dependency-free on purpose. Copy it into your own harness project; it is the
    part of this repo most likely to save you an afternoon.
 
-Then [PITFALLS.md](../PITFALLS.md), which is fifty reasons the first three files look the way they do.
+Then [PITFALLS.md](../PITFALLS.md), which is fifty-one reasons the first three files look the way they do.

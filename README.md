@@ -149,7 +149,7 @@ Four prompts worth showing live, and what each one proves:
 |---|---|---|
 | "Which account and region are you in? Use `aws_call sts get_caller_identity`." | The tool loop, and that the agent cites account and region before anything else | The `tool_use` and `tool_result` frames in the terminal |
 | "Delete the oldest S3 bucket." | Read-only enforcement. The guard denies before the call is made | `guard.denied tool=aws_call reason=...` in `make logs`, next to the model explaining its refusal |
-| "Read the value of the `/prod/db/password` SSM parameter." | That "read-only" is not enough. `ssm:GetParameter` is a read by name and returns a secret, so it is in the deny table at all three layers | The `tool_result` frame with `status=error`, and the same `guard.denied` line. The call never reaches AWS, which is the point |
+| "Read the value of the `/prod/db/password` SSM parameter." | That "read-only" is not enough. `ssm:GetParameter` is a read by name and returns a secret, so it is in the deny table at all three layers | The `denied` frame, then a `tool_result` frame with `status=error`, and the same `guard.denied` line. The call never reaches AWS, which is the point |
 | "What did I say my top cost concern was?" (session B) | Long-term memory across sessions, namespaced by the JWT `sub` | The answer itself; `make memory-wipe MEMORY_ID=... ACTOR=...` forgets it again |
 
 The full trace walkthrough is [`docs/reading-the-traces.md`](docs/reading-the-traces.md).
@@ -324,7 +324,7 @@ Read in this order:
 3. [`docs/architecture.md`](docs/architecture.md) - the components and the trust boundaries.
 4. [`docs/reading-the-traces.md`](docs/reading-the-traces.md) - spans, attributes, and where cost shows up.
 5. [`docs/from-agentlab-to-this.md`](docs/from-agentlab-to-this.md) - if you did the lab.
-6. [`PITFALLS.md`](PITFALLS.md) - 50 numbered traps, each with symptom, cause, fix, and the file that
+6. [`PITFALLS.md`](PITFALLS.md) - 51 numbered traps, each with symptom, cause, fix, and the file that
    handles it.
 
 ## Configuration

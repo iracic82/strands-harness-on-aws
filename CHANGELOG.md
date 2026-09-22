@@ -72,8 +72,12 @@ Initial release.
 ### Notes
 
 - **A tool denial is reported as a `denied` frame.** `ReadOnlyGuard`'s `Deny` reaches the caller as a
-  `denied{tool, reason}` SSE frame, sourced from the SDK's `tool_cancel_event`, ahead of the usual
+  `denied{tool, reason}` SSE frame, sourced from the SDK's `tool_cancel_event`, ahead of the
   `tool_result` frame with `status=error` for the same call.
+- **`tool_result` frames come from a hook, not the stream.** `agent.stream_async()` never yields a tool
+  result in `strands-agents` 1.56, because `ToolResultEvent` is not a callback event. A
+  `ToolResultRecorder` hook on `AfterToolCallEvent` records every finished call instead, and the runtimes
+  drain it between stream events. See PITFALLS P51.
 - The default model is `bedrock/global.anthropic.claude-sonnet-4-6`, not Sonnet 5. The Claude 5 family is
   entitled separately and was refused on the account this was built against. See PITFALLS P29.
 - Cost figures in the README (≈ $1 per turn, ≈ $5 per demo, ≈ $8 hard cap) are estimates and have not been
