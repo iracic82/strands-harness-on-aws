@@ -23,17 +23,20 @@ def cost_explorer(
     region: str | None = None,
     tool_context: ToolContext | None = None,
 ) -> str:
-    """Unblended cost for the last `days` days grouped by SERVICE, REGION, LINKED_ACCOUNT, or USAGE_TYPE (top 25)."""
+    """Unblended cost for the last `days` days grouped by SERVICE, REGION, LINKED_ACCOUNT, or USAGE_TYPE (top 25).
+
+    `region` is ignored: Cost Explorer is only served from us-east-1, so the client is always built there.
+    """
     state = tool_context.invocation_state if tool_context is not None else None
     if group_by not in GROUPS:
         return json.dumps({"error": f"group_by must be one of {GROUPS}", "hint": "e.g. group_by='SERVICE'"})
     if not _budget.take(state, "cost_explorer", CALL_BUDGET):
         return json.dumps({"error": "budget_exhausted", "hint": f"{CALL_BUDGET} Cost Explorer calls per turn"})
-    days = max(1, min(int(days), 90))
-    end = dt.date.today()
-    start = end - dt.timedelta(days=days)
     ids = (state or {}).get("ids", {})
     try:
+        days = max(1, min(int(days), 90))
+        end = dt.date.today()
+        start = end - dt.timedelta(days=days)
         client = _clients.make_client(
             "ce", CE_REGION, session_id=ids.get("session_id", ""), actor_id=ids.get("actor_id", "")
         )
@@ -48,7 +51,9 @@ def cost_explorer(
             for g in period.get("Groups", []):
                 key = g["Keys"][0]
                 totals[key] = totals.get(key, 0.0) + float(g["Metrics"]["UnblendedCost"]["Amount"])
-        groups = sorted(({"key": k, "usd": round(v, 2)} for k, v in totals.items()), key=lambda x: -x["usd"])[:25]
+        groups = sorted(
+            ({"key": k, "usd": round(v, 2)} for k, v in totals.items()), key=lambda x: (-x["usd"], x["key"])
+        )[:25]
         return json.dumps(
             {
                 "start": start.isoformat(),
@@ -66,5 +71,5 @@ def cost_explorer(
                 "hint": "Cost Explorer must be enabled in the account (Billing console) and ce:GetCostAndUsage allowed",
             }
         )
-    except (BotoCoreError, KeyError) as e:
+    except (BotoCoreError, KeyError, ValueError, TypeError) as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"[:500], "hint": "transient AWS error; retry once"})

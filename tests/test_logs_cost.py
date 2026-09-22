@@ -101,3 +101,50 @@ def test_cost_explorer_groups_by_service(monkeypatch):
 def test_cost_explorer_budget():
     state = {"budget": {"cost_explorer": ce.CALL_BUDGET}}
     assert json.loads(_call(ce.cost_explorer, tool_context=_ctx(state)))["error"] == "budget_exhausted"
+
+
+def test_logs_insights_invalid_minutes_returns_json_error(monkeypatch):
+    monkeypatch.setattr(_clients, "make_client", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    out = json.loads(
+        _call(
+            li.logs_insights,
+            log_group="/aws/lambda/orders",
+            query_string="fields @message",
+            minutes="not-a-number",
+            tool_context=_ctx(),
+        )
+    )
+    assert "error" in out
+
+
+def test_cost_explorer_invalid_days_returns_json_error(monkeypatch):
+    monkeypatch.setattr(_clients, "make_client", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    out = json.loads(_call(ce.cost_explorer, days="x", tool_context=_ctx()))
+    assert "error" in out
+
+
+def test_cost_explorer_invalid_amount_returns_json_error(monkeypatch):
+    client = boto3.client("ce", region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="y")
+    stub = Stubber(client)
+    stub.add_response(
+        "get_cost_and_usage",
+        {
+            "ResultsByTime": [
+                {
+                    "TimePeriod": {"Start": "2026-09-15", "End": "2026-09-22"},
+                    "Groups": [
+                        {
+                            "Keys": ["Amazon Bedrock"],
+                            "Metrics": {"UnblendedCost": {"Amount": "not-a-number", "Unit": "USD"}},
+                        }
+                    ],
+                    "Total": {},
+                    "Estimated": True,
+                }
+            ]
+        },
+    )
+    stub.activate()
+    monkeypatch.setattr(_clients, "make_client", lambda *a, **k: client)
+    out = json.loads(_call(ce.cost_explorer, days=7, tool_context=_ctx()))
+    assert "error" in out

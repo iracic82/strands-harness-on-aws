@@ -57,10 +57,10 @@ def logs_insights(
         )
     if not _budget.take(state, "logs_insights", CALL_BUDGET):
         return json.dumps({"error": "budget_exhausted", "hint": f"{CALL_BUDGET} Logs Insights queries per turn"})
-    minutes = max(1, min(int(minutes), MAX_MINUTES))
-    limit = max(1, min(int(limit), 500))
     ids = (state or {}).get("ids", {})
     try:
+        minutes = max(1, min(int(minutes), MAX_MINUTES))
+        limit = max(1, min(int(limit), 500))
         client = _clients.make_client(
             "logs", region, session_id=ids.get("session_id", ""), actor_id=ids.get("actor_id", "")
         )
@@ -95,5 +95,5 @@ def logs_insights(
                 "hint": "check the log group name and the execution role's logs permissions",
             }
         )
-    except (BotoCoreError, KeyError) as e:
+    except (BotoCoreError, KeyError, ValueError, TypeError) as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"[:500], "hint": "transient AWS error; retry once"})
