@@ -330,18 +330,37 @@ Full detail in [`PITFALLS.md`](PITFALLS.md) and [`docs/architecture.md`](docs/ar
 
 ```bash title="manual"
 make memory-wipe MEMORY_ID="$MEMORY_ID" ACTOR="$ACTOR"     # one actor's records, while the memory exists
-make destroy                                               # removes both runtimes and the memory
+make destroy                                               # runtimes, memory, ECR, CodeBuild, the stack
+git checkout agentcore/agentcore.json                      # destroy empties it; this is the only way back
+
 aws cognito-idp delete-user-pool --user-pool-id <pool id>  # auth_bootstrap does not delete it
+aws logs delete-log-group --log-group-name /aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT
+aws logs delete-log-group --log-group-name /aws/codebuild/AgentCore-<project>-<target>-container-builder
 ```
 
 `make memory-wipe` comes first because it needs the memory to still be there. Both variables are required;
 to see what would go without deleting it, call the script directly with `--dry-run`.
 
-`make destroy` runs `agentcore remove all -y` followed by `agentcore deploy -y`, which leaves the project
-registered with none of its resources standing. Destroying the memory takes its records with it, so the
-wipe target is really for the other case: forgetting one person and keeping the deployment. The ECR
-repository and the CDK bootstrap stack outlive
-all of this; remove them by hand if you are done with the account.
+**`make destroy` takes more with it than its name suggests, and leaves one thing behind that matters.**
+It runs `agentcore remove all -y` followed by `agentcore deploy -y`. The `remove` step rewrites
+`agentcore/agentcore.json` to an empty project — your two runtimes and your memory are gone *from the
+file*, not just from AWS — and the deploy then tears the CloudFormation stack down entirely. Measured on a
+real teardown: both runtimes, the memory, **both ECR repositories**, the CodeBuild project, every IAM role
+and the stack itself were gone in 286 seconds. `git checkout agentcore/agentcore.json` is what puts the
+config back; `--reset-placeholders` cannot, because it only rewrites values in runtimes that are still
+there.
+
+What survives, and what to do about it:
+
+- **The log groups — all of them.** The two runtime log groups are created by the AgentCore platform
+  rather than by the stack, so nothing in the stack deletes them, and they hold the whole conversation
+  with retention *never expire* (PITFALLS P61). The CodeBuild and Lambda build-log groups survive too.
+  Delete them by hand, as above; `scripts/smoke.sh` prints the exact names at the end of a run.
+- **The Cognito user pool.** `auth_bootstrap` creates it outside CloudFormation and nothing removes it.
+- **The two KMS keys** that encrypted the ECR repositories are *scheduled* for deletion, not deleted: AWS
+  enforces a waiting period, so expect them in `PendingDeletion` for up to 30 days. Nothing to do.
+- **The CDK bootstrap stack** (`CDKToolkit`) and its asset repository are shared with every other CDK
+  project in the account. Leave them alone unless you are done with CDK in that account entirely.
 
 ## Screenshots
 
