@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,7 +46,7 @@ async def _collect(gen) -> list[dict]:
 def test_constants():
     assert http_app.MAX_PROMPT_BYTES == 32_768 and http_app.MIN_SESSION_LEN == 33
     assert http_app.LIMITS is agent.LIMITS
-    assert http_app.MAX_SECONDS == float(os.environ.get("HARNESS_MAX_SECONDS", "600"))
+    assert http_app.DEFAULT_MAX_SECONDS == 600.0  # MAX_SECONDS itself is bound from the ambient env
 
 
 def test_max_seconds_falls_back_when_the_env_value_is_not_a_number():
@@ -79,8 +79,9 @@ def test_validate_payload_rejects_non_string_actor():
 
 async def test_agent_cache_actor_mismatch_and_lru():
     cache = http_app.AgentCache(maxsize=2)
-    a = await cache.get_or_create("s1", "igor", object)
-    assert await cache.get_or_create("s1", "igor", object) is a
+    a, lock = await cache.get_or_create("s1", "igor", object)
+    assert await cache.get_or_create("s1", "igor", object) == (a, lock)
+    assert lock is cache.lock("s1")
     with pytest.raises(http_app.ActorMismatch):
         await cache.get_or_create("s1", "someone-else", object)
     await cache.get_or_create("s2", "igor", object)
@@ -108,8 +109,8 @@ async def test_agent_cache_builds_once_when_invokes_race():
         return object()
 
     cache = http_app.AgentCache()
-    agents = await asyncio.gather(*(cache.get_or_create("s1", "igor", factory) for _ in range(4)))
-    assert len(built) == 1 and len({id(a) for a in agents}) == 1
+    results = await asyncio.gather(*(cache.get_or_create("s1", "igor", factory) for _ in range(4)))
+    assert len(built) == 1 and len({id(a) for a, _ in results}) == 1
 
 
 async def test_invoke_streams_frames_and_metrics(monkeypatch):
@@ -272,8 +273,37 @@ async def test_cache_never_evicts_a_session_that_is_mid_turn():
         await cache.get_or_create("s2", "igor", lambda: agent_for("s2"))
         assert "busy-session" in cache and "s2" in cache and closed == []  # over maxsize, nothing killed
     await cache.get_or_create("s3", "igor", lambda: agent_for("s3"))
+    await cache.drain_closes()
     assert closed == ["busy-session", "s2"]  # free again, so both trim away in LRU order
     assert "busy-session" not in cache and list(cache._items) == ["s3"]
+
+
+async def test_cache_does_not_evict_a_concurrent_caller_while_closing_a_victim():
+    """Closing an evicted agent must not open a window in which a second caller evicts the entry the first
+    caller was just handed: that caller would stream on an agent the cache no longer knows about."""
+
+    def sleepy_close():
+        time.sleep(0.05)  # a real session manager flushes to AgentCore here
+
+    def plain():
+        return SimpleNamespace(session_manager=None)
+
+    cache = http_app.AgentCache(maxsize=2)
+    await cache.get_or_create("locked", "igor", plain)
+    victim = SimpleNamespace(session_manager=SimpleNamespace(close=sleepy_close))
+    await cache.get_or_create("victim", "igor", lambda: victim)
+
+    async def turn(session_id):
+        agent, lock = await cache.get_or_create(session_id, "igor", plain)
+        async with lock:  # exactly what _handle does, with no await between the two
+            await asyncio.sleep(0.02)
+            return session_id in cache, agent is not None
+
+    async with cache.lock("locked"):  # one entry is mid-turn for the whole test
+        results = await asyncio.gather(turn("n1"), turn("n2"))
+    assert results == [(True, True), (True, True)]
+    assert "victim" not in cache
+    await cache.drain_closes()
 
 
 async def test_cache_closes_evicted_agents_off_the_event_loop():
@@ -285,7 +315,30 @@ async def test_cache_closes_evicted_agents_off_the_event_loop():
     cache = http_app.AgentCache(maxsize=1)
     await cache.get_or_create("s1", "igor", agent_for)
     await cache.get_or_create("s2", "igor", agent_for)
+    await cache.drain_closes()  # the close is a background task now, not awaited inline
     assert seen["t"] is not threading.main_thread()
+
+
+async def test_invoke_releases_the_turn_lock_when_the_consumer_disconnects(monkeypatch):
+    """A client that walks away mid-stream must not leave the session answering `busy` forever."""
+
+    class ChattyAgent(FakeAgent):
+        async def stream_async(self, prompt, **kw):
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                yield {"data": "tick"}
+            yield {"result": _result()}
+
+    _use(monkeypatch, ChattyAgent([]))
+    ctx = _ctx(headers={"X-Actor-Id": "igor"})
+    gen = http_app.invoke({"prompt": "x"}, ctx)
+    assert (await gen.__anext__())["type"] == "text"
+    assert http_app.CACHE.lock(SESSION).locked()
+    await gen.aclose()
+    assert not http_app.CACHE.lock(SESSION).locked()
+    frames = await _collect(http_app.invoke({"prompt": "x"}, ctx))
+    assert [f["type"] for f in frames[-2:]] == ["metrics", "done"]
+    assert not any(f["type"] == "error" for f in frames)
 
 
 async def test_invoke_stream_failure_yields_error_then_done(monkeypatch):

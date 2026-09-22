@@ -86,6 +86,7 @@ class AgentCache:
         self._items: OrderedDict[str, tuple[str, Any, asyncio.Lock]] = OrderedDict()
         self._build_locks: dict[str, asyncio.Lock] = {}
         self._build_waiters: Counter[str] = Counter()
+        self._closing: set[asyncio.Task] = set()
 
     def __contains__(self, session_id: str) -> bool:
         return session_id in self._items
@@ -103,42 +104,59 @@ class AgentCache:
         """The turn lock for a cached session: held for one invocation, so `locked()` means busy."""
         return self._items[session_id][2]
 
-    def _hit(self, session_id: str, actor_id: str) -> Any | None:
+    def _hit(self, session_id: str, actor_id: str) -> tuple[Any, asyncio.Lock] | None:
         if session_id not in self._items:
             return None
-        actor, agent, _ = self._items[session_id]
+        actor, agent, turn_lock = self._items[session_id]
         if actor != actor_id:
             raise ActorMismatch("this session belongs to a different actor")
         self._items.move_to_end(session_id)
-        return agent
+        return agent, turn_lock
 
-    async def _evict(self, protect: str) -> None:
-        """Evict the oldest session that is *not* mid-turn, never the one just handed to a caller. Closing a
+    def _evict(self, protect: str) -> None:
+        """Evict the oldest sessions that are *not* mid-turn, never the one just handed to a caller. Closing a
         live agent would kill its stream and let a second turn interleave on the same session id, so a cache
-        whose entries are all in use runs over its size instead."""
+        whose entries are all in use runs over its size instead.
+
+        Synchronous on purpose: there must be no await between inserting an entry and returning it, or a
+        concurrent cache miss could evict the brand-new entry before its caller ever holds its lock. The
+        blocking close still happens off the loop, as a background task.
+        """
         while len(self._items) > self.maxsize:
             victim = next((sid for sid, (_, _, lk) in self._items.items() if sid != protect and not lk.locked()), None)
             if victim is None:
                 log.warning("agent cache over %d entries: every cached session is mid-turn", self.maxsize)
                 return
             _, evicted, _ = self._items.pop(victim)
-            await asyncio.to_thread(_close, evicted)
+            task = asyncio.create_task(asyncio.to_thread(_close, evicted))
+            self._closing.add(task)  # hold a reference: the loop only keeps weak ones
+            task.add_done_callback(self._closing.discard)
 
-    async def get_or_create(self, session_id: str, actor_id: str, factory: Callable[[], Any]) -> Any:
-        agent = self._hit(session_id, actor_id)
-        if agent is not None:
-            return agent
+    async def drain_closes(self) -> None:
+        """Wait for the background session-manager closes. For tests and an orderly shutdown."""
+        while self._closing:
+            await asyncio.gather(*tuple(self._closing), return_exceptions=True)
+
+    async def get_or_create(
+        self, session_id: str, actor_id: str, factory: Callable[[], Any]
+    ) -> tuple[Any, asyncio.Lock]:
+        """Return the session's agent and its turn lock together, so the caller never has to look the entry
+        up a second time (by then the cache may legitimately have evicted it)."""
+        hit = self._hit(session_id, actor_id)
+        if hit is not None:
+            return hit
         build_lock = self._build_locks.setdefault(session_id, asyncio.Lock())
         self._build_waiters[session_id] += 1
         try:
             async with build_lock:
-                agent = self._hit(session_id, actor_id)
-                if agent is not None:
-                    return agent
+                hit = self._hit(session_id, actor_id)
+                if hit is not None:
+                    return hit
                 agent = await asyncio.to_thread(factory)  # never construct on the event loop (P14)
-                self._items[session_id] = (actor_id, agent, asyncio.Lock())
-                await self._evict(protect=session_id)
-                return agent
+                turn_lock = asyncio.Lock()
+                self._items[session_id] = (actor_id, agent, turn_lock)
+                self._evict(protect=session_id)
+                return agent, turn_lock
         finally:
             self._build_waiters[session_id] -= 1
             if self._build_waiters[session_id] <= 0:
@@ -221,7 +239,7 @@ async def _handle(payload: Any, context: Any) -> AsyncIterator[dict]:
         return
     try:
         rt = platform.detect(session_id, actor)
-        agent = await CACHE.get_or_create(session_id, actor, lambda: build_agent(session_id, actor))
+        agent, lock = await CACHE.get_or_create(session_id, actor, lambda: build_agent(session_id, actor))
     except ActorMismatch:
         yield sse.frame(
             "error",
@@ -237,7 +255,6 @@ async def _handle(payload: Any, context: Any) -> AsyncIterator[dict]:
             hint="check the preflight lines in the runtime logs (agentcore logs)",
         )
         return
-    lock = CACHE.lock(session_id)
     if lock.locked():
         yield sse.frame("error", message="busy", hint="a turn is already running on this session; wait for done")
         return
