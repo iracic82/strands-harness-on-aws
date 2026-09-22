@@ -11,9 +11,12 @@ Every file git would publish is scanned, tracked or not: `git ls-files --cached 
 published with the rest of the repo, so it was scrubbed to the same placeholders everything else uses --
 a clone gets it, and `export-ignore` would only have hidden it from `git archive`.
 
-This gate reads the working tree, not history. Nothing here can see a value that was committed and later
-removed; the history rewrite is a one-off step before first publish, verified with
-`git grep -E '<the literals below>' $(git rev-list --all)` returning nothing.
+Two scans, because scrubbing the tip is not scrubbing the repository. `git push` publishes every reachable
+commit, and gitleaks does not help here -- it knows what a credential looks like and an account id or a
+profile name is not one, so it reports "no leaks found" over the same commits that carry them. The
+working-tree scan below is the one that runs on every commit; the history scan is the one that says
+whether the repository is publishable at all. The fix for a red history scan is a one-off rewrite
+(`git filter-repo --replace-text`) before the remote is ever public, not an edit at the tip.
 """
 
 from __future__ import annotations
@@ -93,6 +96,36 @@ def test_no_account_specific_values_are_in_the_working_tree():
             bad += [f"{rel}: {m.group(0)}" for m in rx.finditer(text) if not _is_placeholder(m.group(0))]
         bad += [f"{rel}: forbidden literal {literal}" for literal in _literal_hits(text)]
     assert bad == [], "\n".join(bad)
+
+
+def test_no_forbidden_literal_is_reachable_in_any_commit():
+    """The working-tree scan above cannot see a value that was committed and later removed, and `git
+    push` publishes all of it. Scrubbing the tip left 115 commit:file pairs reachable here -- an account
+    id, an SSO profile name, a home directory and an email address across 47 of 65 commits -- while both
+    gates reported clean: this file reads `git ls-files`, and gitleaks has no rule for any of them.
+
+    Only the literals are scanned. The regex patterns would need a per-path allowlist to be usable over
+    history (a lockfile hash is twelve digits), and the values a regex cannot recognise are exactly the
+    ones nothing else catches. `-l` so the output names commits and paths and never prints the value
+    itself, which would otherwise land in a CI log.
+
+    A red result here is not fixable at the tip. Rewrite history before the remote is public:
+    `git filter-repo --replace-text` with one `old==>new` line per literal, from a fresh mirror clone.
+    """
+    commits = _git("rev-list", "--all").split()
+    assert commits, "no commits to scan; this test is meaningless in a repository with no history"
+    found = subprocess.run(
+        ["git", "grep", "-I", "-i", "-l", "-F", *[arg for lit in FORBIDDEN_LITERALS for arg in ("-e", lit)], *commits],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if found.returncode == 1:  # git grep's "no matches", which is the only outcome that passes
+        return
+    assert found.returncode == 0, f"git grep failed ({found.returncode}): {found.stderr.strip()[:200]}"
+    hits = found.stdout.splitlines()
+    shown = "\n".join(hits[:5])
+    pytest.fail(f"{len(hits)} commit:file pairs carry a forbidden literal. First few:\n{shown}")
 
 
 def test_every_pitfall_citation_resolves_to_a_pitfall():
