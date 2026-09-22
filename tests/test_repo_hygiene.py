@@ -128,6 +128,35 @@ def test_no_forbidden_literal_is_reachable_in_any_commit():
     pytest.fail(f"{len(hits)} commit:file pairs carry a forbidden literal. First few:\n{shown}")
 
 
+def test_no_twelve_digit_account_id_is_reachable_in_any_commit():
+    """The account id is the one forbidden value that cannot be listed in FORBIDDEN_LITERALS, because the
+    list itself is a tracked file, so the test above cannot see it; it was 93 of the 115 pairs the first
+    rewrite had to remove. A twelve-digit run bounded by non-digits, other than the documented example
+    account, is treated as one. Lockfiles and binaries are excluded by pathspec, as the working-tree scan
+    excludes them by suffix, and `-l` keeps the value out of CI logs. Needs a git built with PCRE, which
+    the GitHub runners and Homebrew git both are; anything else skips loudly rather than passing.
+    """
+    commits = _git("rev-list", "--all").split()
+    assert commits, "no commits to scan; this test is meaningless in a repository with no history"
+    pattern = rf"(?<!\d)(?!{EXAMPLE_ACCOUNT})\d{{12}}(?!\d)"
+    excludes = [f":!*{suffix}" for suffix in SKIP_SUFFIXES]
+    found = subprocess.run(
+        ["git", "grep", "-I", "-P", "-l", "-e", pattern, *commits, "--", *excludes],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if found.returncode == 1:
+        return
+    if found.returncode not in (0, 1) and "PCRE" in found.stderr.upper():
+        pytest.skip(
+            f"this git has no PCRE support; the account-id history scan did not run: {found.stderr.strip()[:120]}"
+        )
+    assert found.returncode == 0, f"git grep failed ({found.returncode}): {found.stderr.strip()[:200]}"
+    hits = found.stdout.splitlines()
+    pytest.fail(f"{len(hits)} commit:file pairs carry a twelve-digit account id. First few:\n" + "\n".join(hits[:5]))
+
+
 def test_every_pitfall_citation_resolves_to_a_pitfall():
     """`(P52)` in a comment is a promise that PITFALLS.md has a P52 and that it is about this.
 

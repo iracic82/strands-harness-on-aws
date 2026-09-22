@@ -51,7 +51,7 @@ Initial release.
   digest-pinned base.
 - **CI** on Python 3.12 and 3.14: ruff, pytest, gitleaks, an arm64 buildx build of both images, and a
   fresh-clone run of the whole suite, and a docs gate (`scripts/verify_docs.py`) that runs every runnable
-  command block and parses every Mermaid diagram with mermaid-cli. 347 tests, no network.
+  command block and parses every Mermaid diagram with mermaid-cli. The whole suite runs offline.
 - **Documentation**: `README.md`, `PITFALLS.md` (62 entries), and a five-part learning path under `docs/`.
 
 - **Screenshots** under `docs/img/` from the first real deployment: the two-session memory demo with a
