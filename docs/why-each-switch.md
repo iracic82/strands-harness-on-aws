@@ -262,4 +262,5 @@ For completeness, the kwargs `build_agent` passes that are *not* fighting a defa
 | `context_manager` | `"auto"` | Long tool outputs need compaction, and the harness does it better than we would |
 | `name` | `"ops-investigator"` | This becomes the span name: `invoke_agent ops-investigator` |
 | `trace_attributes` | `session.id`, `user.id`, `gen_ai.request.model`, `harness.effort` | See [reading-the-traces.md](reading-the-traces.md) |
+| *(no content in spans)* | nothing to set | The traces carry ids, model and token counts, never prompts or tool output — measured on every `chat` span this repo has deployed. `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` is left unset on purpose: it routes content rather than disabling it, and setting it to `true` would leave more in the span. See [reading-the-traces.md](reading-the-traces.md) |
 | `instructions` | `OPS_INSTRUCTIONS`, plus `LOCAL_TOOLS_NOTE` in local | The prompt must describe the tools the agent actually has, and the two profiles differ |

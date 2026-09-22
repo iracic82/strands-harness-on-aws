@@ -8,6 +8,12 @@ Once they appear, this is what you are looking at.
 **CloudWatch Transaction Search, once per region.** Without it, spans are written and nothing indexes them,
 so the GenAI Observability views stay empty while X-Ray looks fine.
 
+Enabling it is not the same as it working. In this repo's first cloud run the destination read
+`CloudWatchLogs` / `ACTIVE` with a 100% indexing rule, and `aws/spans` still held not one span from either
+runtime 59 minutes later, while X-Ray held 95 traces naming them. **Check X-Ray first, and use the X-Ray trace view** — it
+answers immediately and is the view every example below assumes. GenAI Observability is the richer view,
+once Transaction Search actually delivers. See PITFALLS P59.
+
 ```bash title="manual"
 aws xray update-trace-segment-destination --destination CloudWatchLogs --region us-west-2
 ```
@@ -19,10 +25,14 @@ command when `Status` is not `ACTIVE` and `Destination` is not `CloudWatchLogs`.
 `CMD ["opentelemetry-instrument", "python", "-m", "main"]`. Not a library call inside the app, a wrapper
 around it.
 
-**`OTEL_TRACES_EXPORTER` must stay unset.** If it is set, the Strands telemetry module builds its own
-exporter and competes with ADOT for ownership of the tracer provider. You then get no spans, or two copies
-of some of them, depending on which one wins. `agentcore/agentcore.json` never sets it, and
-`preflight.run_preflight` WARNs in the container log if something else did.
+**`OTEL_TRACES_EXPORTER` must be left to ADOT.** `agentcore/agentcore.json` never sets it — but ADOT sets
+it itself, to `otlp`, before your code runs: `opentelemetry-instrument` loads the distro, and under
+AgentCore's agent-observability mode the distro does `os.environ.setdefault(OTEL_TRACES_EXPORTER, "otlp")`.
+So the healthy container has it *set*, and `preflight.run_preflight` logs
+`otel_exporter=PASS otlp; ADOT owns tracing`. It WARNs on any other value, because that means something
+took the exporter away from ADOT and the Strands telemetry module will build its own and compete for the
+tracer provider — at which point you get no spans, or two copies of some. It also WARNs when the variable
+is *unset* in the cloud, because that means the distro never loaded at all. See PITFALLS P56.
 
 All three together are P8. If your traces are missing, check them in that order.
 
@@ -47,7 +57,8 @@ flowchart TD
 
 **`invoke_agent ops-investigator`** is the root, and there should be **exactly one per invocation**. Two
 means you built the agent twice, which usually means the cache missed when it should not have. The cloud
-smoke asserts the count with a Logs Insights query against `aws/spans`:
+smoke counts them with a Logs Insights query against `aws/spans`, and counts X-Ray traces alongside it so
+that a zero here reads as "not indexed yet" rather than "not instrumented" (P59):
 
 ```
 fields name | filter name like /invoke_agent ops-investigator/ | stats count() as n
@@ -77,11 +88,27 @@ a turn a subagent actually consumed.
 The `reader` subagent overrides these with `session.id` plus `agent.role: "reader"`, so a subagent's spans
 are distinguishable from its parent's without reading the tree structure.
 
-Notice what is not there. No prompt, no response, no tool arguments, no tool output. Content capture is off
-and nothing in this repo turns it on. The `user_agent_extra` on every boto3 client
-(`strands-harness-on-aws session=<id> actor=<id>`, set in `tools/_clients.py:client_config`) puts the same
-two ids into CloudTrail, so a trace and an API call log can be correlated without either of them carrying
-data.
+Notice what is not there. No prompt, no response, no tool arguments, no tool output — and that is measured,
+not assumed. Every `chat global.anthropic.claude-sonnet-4-6` span this deployment produced carries
+`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens`,
+`gen_ai.response.finish_reasons`, `gen_ai.system`, `gen_ai.provider.name` and the two
+`gen_ai.usage.*_tokens` counts, and nothing else content-shaped. The spans carry no span events, and the
+strings `gen_ai.prompt` and `gen_ai.completion` do not appear anywhere in the runtime's log group.
+
+One thing to understand before you reach for a switch, because the obvious one is not an off switch.
+`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` does not control whether content is *recorded*; it controls where it
+*goes*. Unset (the default), the AWS OTLP span exporter runs ADOT's LLO handler, which lifts any
+prompt/completion attributes off the span into a separate Gen AI Event log record and strips them from the
+span. Set to `true`, that handler is skipped and spans are exported unmodified — so if content were being
+recorded, opting "out" would leave **more** of it in the trace, not less. What actually decides whether
+content is recorded at all is the instrumentation: `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
+(which ADOT sets to `true`) governs the OpenTelemetry GenAI instrumentations, and this repo's spans simply
+do not carry message content. Treat "no content in the traces" as a property of what is instrumented here,
+not as a guarantee this repo enforces.
+
+The `user_agent_extra` on every boto3 client (`strands-harness-on-aws session=<id> actor=<id>`, set in
+`tools/_clients.py:client_config`) puts the same two ids into CloudTrail, so a trace and an API call log
+can be correlated without either of them carrying data.
 
 ## Where cost shows up
 
@@ -98,10 +125,12 @@ multiplies. It is an estimate, it is computed locally, and it is `null` for any 
 recognise, which is deliberate: a wrong number is worse than no number. `cache_read_tokens` is worth
 watching, because prompt caching (`caching="auto"`) is most of the saving on a multi-turn investigation.
 
-**In CloudWatch GenAI Observability, minutes later.** The console's model invocation views aggregate token
-counts and cost per model across invocations, built from the `gen_ai.usage.*` attributes on the `chat`
-spans. Use the stream's `est_usd` while you are iterating, and the console when you want to know what a day
-of demos actually cost.
+**In CloudWatch GenAI Observability, once Transaction Search delivers.** The console's model invocation
+views aggregate token counts and cost per model across invocations, built from the `gen_ai.usage.*`
+attributes on the `chat` spans. They read the same `aws/spans` index that can stay empty for tens of
+minutes after Transaction Search is enabled, so do not read an empty panel as a broken agent — check X-Ray
+first (P59). Use the stream's `est_usd` while you are iterating, and the console when you want to know what
+a day of demos actually cost.
 
 `stop_reason` is the field to check first when a turn ends oddly. Anything starting with `limit_` means a
 budget trip, and the app will have emitted an `error` frame and run one bounded closing turn before `done`.

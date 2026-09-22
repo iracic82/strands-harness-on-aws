@@ -10,9 +10,10 @@ That breaks *every* script in this directory, not just this one.
 
 Prints the **access** token by default (`--id-token` for the ID token, `--json` for both plus expiry).
 AgentCore's CUSTOM_JWT authorizer matches `allowedClients` against the token's `client_id` claim, which
-only the access token carries -- an ID token carries `aud` instead. Which one this authorizer actually
-accepts is confirmed by the cloud smoke (spec 10.1) and recorded in PITFALLS (P24); both are printed by
-`--json` so the smoke can try either without a second sign-in.
+only the access token carries -- an ID token carries `aud` instead. The first cloud smoke confirmed it:
+the access token returned 200 and the ID token returned 401 `Claim 'client_id' value mismatch with
+configuration` (PITFALLS P60). Both are still printed by `--json`, so the two can be compared without a
+second sign-in.
 
 The container reads the actor id from the token's `sub`, which is the same for both.
 """

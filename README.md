@@ -134,7 +134,7 @@ count can be zero while tracing is working perfectly -- which is why the script 
 for the same window (PITFALLS P59). And the answer to "which token does the authorizer accept" is the
 **access** token, not the ID token: `allowedClients` is matched against the `client_id` claim, which only
 the access token carries, and an ID token comes back `401 Claim 'client_id' value mismatch with
-configuration` (PITFALLS P24).
+configuration` (PITFALLS P60).
 
 Then invoke the deployed runtime with a real token:
 
@@ -375,6 +375,7 @@ in, but nothing here loads it for you: there is no dotenv dependency, so source 
 | `A2A_PUBLIC_URL` | placeholder | The A2A runtime's own invocation URL, which the agent card advertises. Written back after the first deploy |
 | `COGNITO_DISCOVERY_URL` | placeholder | The OIDC discovery document the A2A card names in its security scheme. Written by `auth_bootstrap` |
 | `OTEL_TRACES_EXPORTER` | set to `otlp` by ADOT itself | Leave it alone. ADOT sets it before your code runs; setting it to anything else makes the harness fight ADOT for the exporter and you lose your traces (PITFALLS P8, P56) |
+| `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` | unset | Not an off switch for content capture. Unset, ADOT lifts any prompt/response attributes off the span into a separate Gen AI Event log record; set to `true`, spans are exported unmodified, which would leave *more* in the trace. This agent's spans carry no message content either way, measured (PITFALLS P8, spec §10.2) |
 
 ## Tested versions
 

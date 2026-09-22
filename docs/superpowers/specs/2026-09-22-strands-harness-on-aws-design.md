@@ -353,12 +353,27 @@ Resolved against a real deployment in `us-west-2` on 2026-09-22 (the first cloud
    the actor from the token and never fell back. What the spec did not anticipate is that AgentCore drops
    every header *not* named, which broke A2A outright until `A2A-Version` was added to the A2A runtime's
    list. See PITFALLS P52.
-2. **ADOT content capture — the reading was backwards.** `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` is an
-   opt-*out*: `amazon/opentelemetry/distro/_utils.py` treats it as false by default and only `"true"` turns
-   capture off. ADOT additionally sets `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` when
-   `AGENT_OBSERVABILITY_ENABLED=true`, which is the AgentCore default. So prompt and response content is
-   captured into traces unless you opt out, which is a privacy decision worth making deliberately rather
-   than a wiring detail. Related: ADOT also sets `OTEL_TRACES_EXPORTER` itself (PITFALLS P56).
+2. **ADOT content capture — measured, and it is not a switch you flip.** No prompt or completion content
+   reaches the traces, which is what `docs/reading-the-traces.md` always claimed; this run turns that from
+   an assumption into a measurement. All 14 `chat global.anthropic.claude-sonnet-4-6` spans in the runtime's
+   own `spans` log stream carry only `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`,
+   `gen_ai.request.max_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.system` and the two
+   `gen_ai.usage.*_tokens` counts; they carry no span events, and the strings `gen_ai.prompt` and
+   `gen_ai.completion` appear nowhere in the runtime log group.
+
+   The mechanism matters, because the obvious control does the opposite of what its name suggests.
+   `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT` does not decide whether content is recorded, only where it lands.
+   In `aws-opentelemetry-distro` 0.18.0, `OTLPAwsSpanExporter.export` runs ADOT's `LLOHandler` when agent
+   observability is on **and** the flag is *not* set; that handler lifts any prompt/completion attributes off
+   the span into a separate Gen AI Event log record and strips them from the span. Setting the flag to
+   `"true"` skips the handler and exports spans unmodified — so it is a routing switch, and if content were
+   present, opting "out" would leave more of it in the trace. What governs recording is
+   `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` (ADOT sets it to `true`), which the OpenTelemetry
+   GenAI instrumentations read; the spans this agent emits simply do not carry message content.
+
+   So the repo needs no change here, but the claim in the docs is now evidence-backed and carries the caveat
+   that it is a property of what is instrumented, not something this repo enforces. Related: ADOT also sets
+   `OTEL_TRACES_EXPORTER` itself (PITFALLS P56).
 3. **`a2a-sdk` 1.x alongside `strands-agents` — confirmed, no conflict.** `uv.lock` resolves `a2a-sdk`
    1.1.5 with `strands-agents[otel]` 1.56.0, and both images built and ran with that lock.
 4. **Log-group retention — manual, and there is no CDK context key for the part that matters.** The two

@@ -1,8 +1,8 @@
 # PITFALLS
 
-Fifty-nine numbered traps between a Strands harness agent that works on your laptop and one that works on
+Sixty numbered traps between a Strands harness agent that works on your laptop and one that works on
 Amazon Bedrock AgentCore. P1 to P27 were found while designing this repo and are fixed in its code. P28 to
-P51 were found while building it, which is to say the hard way. P52 to P59 were found the first time the
+P51 were found while building it, which is to say the hard way. P52 to P60 were found the first time the
 finished repo was deployed into a real account, which is the only way some of them could have been found.
 
 Every entry has the same four fields. **Where in this repo** names the file and function that handles it,
@@ -18,7 +18,7 @@ Verified 2026-09-22 against `strands-harness` 0.1.1, `strands-agents` 1.56.0, `b
 - [State, memory, and sessions](#state-memory-and-sessions): P2, P3, P14, P23, P27, P37, P42, P43, P48
 - [Tools and the agent loop](#tools-and-the-agent-loop): P4, P10, P11, P12, P13, P19, P21, P33, P34, P50
 - [Runtime, streaming, and protocols](#runtime-streaming-and-protocols): P9, P22, P24, P35, P36, P40, P41, P45, P46, P51, P52, P58
-- [Security and IAM](#security-and-iam): P15, P26, P31, P32, P53
+- [Security and IAM](#security-and-iam): P15, P26, P31, P32, P53, P60
 - [Observability and operations](#observability-and-operations): P8, P38, P49, P56, P57, P59
 
 ---
@@ -566,9 +566,16 @@ header so it can write its own. A bearer token and SigV4 cannot coexist on one r
 the `before-sign` event, which is emitted even for unsigned clients and is the last hook before the request
 goes out. Or just use plain HTTPS against the same data-plane URL, which is what a `CUSTOM_JWT` runtime
 expects anyway.
+Both work against a `CUSTOM_JWT` runtime -- the first cloud smoke proved it rather than assuming it.
+`invoke_agent_runtime` with an UNSIGNED client and the bearer injected at `before-sign` streamed frames
+normally, and so did plain HTTPS with the same token. What does *not* work is SigV4 on its own: with no
+bearer, the same call returns `AccessDeniedException: Authorization method mismatch. The agent is
+configured for a different authorization method than what was used in your request.` So the `https`
+transport is not required, and `TRANSPORT ?= https` stays the default only because it is the path with
+fewer moving parts.
 **Where in this repo.** `scripts/invoke.py:bearer_client` and `:boto3_config` do the first;
-`scripts/invoke.py:invocations_url` plus `--transport https` does the second. Pinned by
-`tests/test_scripts.py::test_the_bearer_token_survives_on_the_boto3_transport` and
+`scripts/invoke.py:invocations_url` plus `--transport https` does the second. `Makefile` (`TRANSPORT`).
+Pinned by `tests/test_scripts.py::test_the_bearer_token_survives_on_the_boto3_transport` and
 `::test_boto3_is_unsigned_only_when_a_bearer_token_is_in_play`.
 
 ### P46. The A2A card lives on the path, not after the query string
@@ -702,6 +709,26 @@ print the session id and the frames, which is the part worth watching.
 **Where in this repo.** `Makefile` (`invoke`, `a2a-card`; `token` was already `@`). Pinned by
 `tests/test_scripts.py::test_no_makefile_recipe_echoes_the_token`.
 
+### P60. The JWT authorizer takes the access token, not the ID token
+
+**Symptom.** A freshly minted, perfectly valid Cognito token is rejected by the runtime with HTTP 401 and
+
+```json
+{"jsonrpc": "2.0", "error": {"code": -32001, "message": "Claim 'client_id' value mismatch with configuration."}}
+```
+
+**Cause.** AgentCore's `CUSTOM_JWT` authorizer matches `allowedClients` against the token's `client_id`
+claim. Only the **access** token carries `client_id`; the ID token carries the app client id in `aud`
+instead and has no `client_id` at all. Both tokens come back from the same `initiate_auth` call and both
+carry the same `sub`, so the actor id would have been identical either way -- which is exactly why reaching
+for the ID token is easy and the failure is confusing.
+**Fix.** Send the access token. `scripts/get_token.py` prints it by default; `--id-token` exists only so
+the two can be compared, and `--json` prints both.
+**Where in this repo.** `scripts/get_token.py` (the default branch of `main`);
+`agentcore/agentcore.json` (`authorizerConfiguration.customJwtAuthorizer.allowedClients`, written by
+`scripts/auth_bootstrap.py:apply_auth`). Confirmed in the first cloud smoke: access token 200, ID token 401
+with the message above.
+
 ---
 
 ## Observability and operations
@@ -780,9 +807,16 @@ group directly: `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`.
 a 100% indexing rule, and a Logs Insights query over `aws/spans` returns zero rows for your service.
 **Cause.** Enabling Transaction Search and indexing spans into `aws/spans` are not the same step. The
 CLI's own deploy output says so ("It takes ~10 minutes for transaction search to be fully active and for
-traces from invocations to be indexed"); in this repo's first cloud smoke `aws/spans` was still empty
-after fifteen minutes while X-Ray already held 41 traces from the two runtimes.
+traces from invocations to be indexed"), and that estimate is optimistic. In this repo's first cloud smoke
+the destination read `CloudWatchLogs` / `ACTIVE` with a 100% indexing rule from 19:27 UTC, and at 20:26 --
+**59 minutes later, after four deploys and roughly 25 invocations** -- `aws/spans` still held not one span
+from either runtime, while X-Ray held 95 traces naming them. On a fresh account the group may not exist at
+all yet, because Transaction Search creates it on first delivery.
 **Fix.** Never read an empty `aws/spans` as "not instrumented". Check X-Ray over the same window first --
-that is the difference between "not indexed yet" and "no spans at all" -- and re-run the query later.
-**Where in this repo.** `scripts/smoke.sh` -- the span check queries `aws/spans` and X-Ray and reports
-which of the two answered.
+that is the difference between "not indexed yet" and "no spans at all". Budget tens of minutes, and accept
+that in a region where Transaction Search was only just enabled the spans may not arrive during your run at
+all. Use the **X-Ray trace view** for anything you need to show someone; GenAI Observability is the richer
+view, but it reads the index that is empty.
+**Where in this repo.** `scripts/smoke.sh` -- the span check queries `aws/spans` and X-Ray, reports which
+of the two answered, and treats a missing `aws/spans` log group as this case rather than as an error;
+`docs/reading-the-traces.md`.
