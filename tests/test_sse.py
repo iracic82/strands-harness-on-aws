@@ -143,6 +143,88 @@ def test_content_bytes_falls_back_for_non_text_non_json_blocks():
     assert out["bytes"] > 0
 
 
+# --- tool_cancel_event: an intervention denied the call before it ran (spec: denials visible on the
+# wire), the SDK's real sequence is tool_use_stream -> tool_cancel_event -> error tool_result. ---
+
+
+def test_tool_cancel_event_yields_denied_frame_then_error_tool_result():
+    mapper = sse.EventMapper()
+    tool_use_event = {
+        "type": "tool_use_stream",
+        "current_tool_use": {
+            "toolUseId": "t1",
+            "name": "aws_call",
+            "input": '{"service": "ec2", "operation": "terminate_instances"}',
+        },
+    }
+    assert sse.map_event(tool_use_event, mapper=mapper) == {
+        "v": 1,
+        "type": "tool_use",
+        "name": "aws_call",
+        "input_keys": ["operation", "service"],
+    }
+
+    reason = "DENIED: read-only: ec2:terminate_instances is not a permitted read operation"
+    cancel_event = {
+        "tool_cancel_event": {
+            "tool_use": {
+                "toolUseId": "t1",
+                "name": "aws_call",
+                "input": {"service": "ec2", "operation": "terminate_instances"},
+            },
+            "message": reason,
+        }
+    }
+    out = sse.map_event(cancel_event, mapper=mapper)
+    assert out == {"v": 1, "type": "denied", "tool": "aws_call", "reason": reason}
+
+    result_event = {
+        "type": "tool_result",
+        "tool_result": {"toolUseId": "t1", "status": "error", "content": [{"text": reason}]},
+    }
+    out = sse.map_event(result_event, mapper=mapper)
+    assert out["type"] == "tool_result" and out["status"] == "error" and out["name"] == "aws_call"
+
+
+def test_tool_cancel_event_dedupes_by_tool_use_id():
+    mapper = sse.EventMapper()
+    ev = {"tool_cancel_event": {"tool_use": {"toolUseId": "t2", "name": "shell"}, "message": "DENIED: no"}}
+    first = sse.map_event(ev, mapper=mapper)
+    second = sse.map_event(ev, mapper=mapper)
+    assert first == {"v": 1, "type": "denied", "tool": "shell", "reason": "DENIED: no"}
+    assert second is None
+
+
+def test_tool_cancel_event_reason_truncated_to_300_chars():
+    long_message = "DENIED: " + "x" * 400
+    ev = {"tool_cancel_event": {"tool_use": {"toolUseId": "t3", "name": "shell"}, "message": long_message}}
+    out = sse.map_event(ev)
+    assert out["reason"] == long_message[:300] and len(out["reason"]) == 300
+
+
+def test_tool_cancel_event_handles_odd_shapes_without_raising():
+    assert sse.map_event({"tool_cancel_event": {}}) == {"v": 1, "type": "denied", "tool": "", "reason": ""}
+    assert sse.map_event({"tool_cancel_event": "not-a-dict"}) == {"v": 1, "type": "denied", "tool": "", "reason": ""}
+    out = sse.map_event({"tool_cancel_event": {"tool_use": "nope", "message": 123}})
+    assert out == {"v": 1, "type": "denied", "tool": "", "reason": ""}
+
+
+def test_map_event_tool_cancel_without_mapper_still_maps():
+    ev = {
+        "tool_cancel_event": {
+            "tool_use": {"toolUseId": "t4", "name": "shell"},
+            "message": "DENIED: shell is disabled for the read-only investigator in this profile",
+        }
+    }
+    out = sse.map_event(ev)
+    assert out == {
+        "v": 1,
+        "type": "denied",
+        "tool": "shell",
+        "reason": "DENIED: shell is disabled for the read-only investigator in this profile",
+    }
+
+
 def test_estimate_usd_returns_none_and_warns_for_unknown_model_family(caplog):
     with caplog.at_level("WARNING", logger="ops_investigator.sse"):
         result = sse.estimate_usd({"inputTokens": 1000}, "bedrock/amazon.nova-pro-v1:0")

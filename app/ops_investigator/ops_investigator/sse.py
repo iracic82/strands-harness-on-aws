@@ -46,6 +46,7 @@ class EventMapper:
     def __init__(self) -> None:
         self._names: dict[str, str] = {}
         self._emitted: set[str | None] = set()
+        self._denied: set[str] = set()
 
     def map(self, event: Any) -> dict | None:
         if not isinstance(event, dict):
@@ -56,6 +57,8 @@ class EventMapper:
             return frame("thinking", delta=event["reasoningText"])
         if event.get("type") == "tool_use_stream":
             return self._map_tool_use_stream(event)
+        if "tool_cancel_event" in event:
+            return self._map_tool_cancel(event)
         if event.get("type") == "tool_result":
             return self._map_tool_result(event)
         return None
@@ -82,6 +85,26 @@ class EventMapper:
             self._emitted.add(tid)
             return frame("tool_use", name=str(name), input_keys=sorted(inp.keys()))
         return None  # partial chunk (input hasn't streamed in as a full JSON object yet), or a repeat
+
+    def _map_tool_cancel(self, event: dict) -> dict | None:
+        """An intervention (`ReadOnlyGuard`) denied the call before it ran: the SDK yields
+        `ToolCancelEvent` followed by an error `tool_result` for the same toolUseId. Emit exactly one
+        `denied` frame per toolUseId; the following `tool_result` is still mapped normally (it just
+        carries `status="error"` like any other failed call).
+        """
+        tc = event.get("tool_cancel_event")
+        tc = tc if isinstance(tc, dict) else {}
+        tu = tc.get("tool_use")
+        tu = tu if isinstance(tu, dict) else {}
+        tid = tu.get("toolUseId")
+        name = tu.get("name", "")
+        if tid is not None:
+            if tid in self._denied:
+                return None
+            self._denied.add(tid)
+        message = tc.get("message")
+        reason = message if isinstance(message, str) else ""
+        return frame("denied", tool=str(name), reason=reason[:300])
 
     def _map_tool_result(self, event: dict) -> dict | None:
         tr = event.get("tool_result")

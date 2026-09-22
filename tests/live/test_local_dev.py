@@ -100,13 +100,19 @@ def test_three_prompts_and_local_state(server):
         server, "Try to run aws_call ec2 terminate_instances with InstanceIds ['i-0']. Report what happened."
     )
     assert _types(mutate)[-1] == "done", _types(mutate)
-    # `ReadOnlyGuard` denies in `before_tool_call`, so the tool never runs and the harness emits no
-    # `tool_result` event for it: the proof of a denial is an attempt with no result, which is structural
-    # and does not depend on how the model phrases its report. There is no `denied` frame type; the
-    # refusal reaches the caller as the model's own account, quoting the guard's reason.
+    # `ReadOnlyGuard` denies in `before_tool_call`, so the tool never runs. The SDK's `tool_cancel_event`
+    # for the denial reaches the wire as a `denied` frame (EventMapper._map_tool_cancel); the harness
+    # still emits an error `tool_result` for the same toolUseId, but no successful one.
     attempted = [frame for frame in mutate if frame.get("type") == "tool_use" and frame.get("name") == "aws_call"]
-    ran = [frame for frame in mutate if frame.get("type") == "tool_result" and frame.get("name") == "aws_call"]
+    denied = [frame for frame in mutate if frame.get("type") == "denied"]
+    ran = [
+        frame
+        for frame in mutate
+        if frame.get("type") == "tool_result" and frame.get("name") == "aws_call" and frame.get("status") != "error"
+    ]
     assert attempted and not ran, mutate
+    assert denied and denied[0].get("tool") == "aws_call", mutate
+    assert "read-only" in denied[0].get("reason", "").lower(), mutate
     said = _text(mutate).lower()
     assert any(marker in said for marker in ("denied", "not a permitted", "blocked", "read-only")), mutate
 
