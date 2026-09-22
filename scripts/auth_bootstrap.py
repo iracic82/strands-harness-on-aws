@@ -10,10 +10,18 @@ The config is edited structurally (load, mutate, `json.dump(indent=2)`) rather t
 the committed placeholders have to stay schema-valid for CDK -- `discoveryUrl` is a real https URL ending
 in the OIDC well-known path that merely *contains* the token -- so there is no bare token to regex for.
 
-`--reset-placeholders` puts the placeholders back -- the discovery URL, the allowed client, and the
-`A2A_PUBLIC_URL` that `smoke.sh` fills in after the first deploy, which carries the account id. None of
-those may ever be committed (the repo-hygiene gate rejects them). It restores the values, not the
-AgentCore CLI's original whitespace; `git checkout agentcore/agentcore.json` drops both in one step.
+It also pins the deployment region into both runtimes' `AWS_REGION`/`AWS_DEFAULT_REGION`. Nothing else
+writes them: `setup.py` fills in `agentcore/aws-targets.json` (what CDK deploys against) and `.env`, and
+neither reaches this file. A committed literal region would therefore survive a deploy to anywhere else
+and produce two READY runtimes whose every invoke fails -- the memory lives in the deployed region and
+the container looks for it in the committed one (P62). This script is already on the deploy critical
+path and already takes `--region`, so it is where the two have to be reconciled.
+
+`--reset-placeholders` puts the placeholders back -- the discovery URL, the allowed client, the two
+region variables, and the `A2A_PUBLIC_URL` that `smoke.sh` fills in after the first deploy, which carries
+the account id. None of those may ever be committed (the repo-hygiene gate rejects them). It restores the
+values, not the AgentCore CLI's original whitespace; `git checkout agentcore/agentcore.json` drops both
+in one step.
 """
 
 from __future__ import annotations
@@ -30,8 +38,16 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "agentcore" / "agentcore.json"
 
 PLACEHOLDER = "REPLACED_BY_auth_bootstrap"
-PLACEHOLDER_REGION = "us-west-2"  # only ever part of the placeholder URL; the real one comes from --region
+# Only ever part of the placeholder *URL*, which the CDK schema requires to be URL-shaped before
+# bootstrap. It is not a default region: nothing deploys to it unless --region says so.
+PLACEHOLDER_URL_REGION = "us-west-2"
 DISCOVERY_ENV = "COGNITO_DISCOVERY_URL"  # the A2A container reads this to advertise the card's security scheme
+# Both, in every runtime: `platform.detect` reads AWS_REGION and refuses the cloud profile without one,
+# and botocore resolves a client built without an explicit region_name from AWS_DEFAULT_REGION alone.
+# The committed value is the bare placeholder -- the CLI's project schema types an env var value as a
+# plain string (verified against @aws/agentcore 0.30.0), so a placeholder still passes `deploy --dry-run`,
+# and a wrong region cannot be inherited by a reader who forgets to run this script.
+REGION_ENVS = ("AWS_REGION", "AWS_DEFAULT_REGION")
 # smoke.sh writes the deployed A2A endpoint here, and that URL contains the account id. This script does
 # not set it, but --reset-placeholders has to clear it: it is the only "put the file back" command there is.
 PUBLIC_URL_ENV = "A2A_PUBLIC_URL"
@@ -43,7 +59,7 @@ def discovery_url(region: str, pool_id: str) -> str:
 
 
 def placeholder_discovery_url() -> str:
-    return discovery_url(PLACEHOLDER_REGION, PLACEHOLDER)
+    return discovery_url(PLACEHOLDER_URL_REGION, PLACEHOLDER)
 
 
 def find_pool(idp: Any, name: str) -> str | None:
@@ -133,6 +149,15 @@ def set_env_var(config: dict, name: str, value: str) -> list[str]:
     return changed
 
 
+def apply_region(config: dict, region: str) -> list[str]:
+    """Pin one region into every runtime's AWS_REGION and AWS_DEFAULT_REGION. Returns the runtimes it
+    changed. Both names are set to the same value; see REGION_ENVS for why there are two of them."""
+    changed: list[str] = []
+    for var in REGION_ENVS:
+        changed += [name for name in set_env_var(config, var, region) if name not in changed]
+    return changed
+
+
 def load_config(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -143,11 +168,13 @@ def write_config(path: Path, config: dict) -> None:
 
 def reset_placeholders(path: Path) -> list[str]:
     """Put every deployment-time value back to its committed placeholder: the discovery URL, the allowed
-    client, and the A2A public URL that `smoke.sh` fills in after the first deploy."""
+    client, the two region variables, and the A2A public URL that `smoke.sh` fills in after the first
+    deploy."""
     config = load_config(path)
     changed = apply_auth(
         config, discovery=placeholder_discovery_url(), client_id=PLACEHOLDER, env_discovery=PLACEHOLDER
     )
+    changed += [name for name in apply_region(config, PLACEHOLDER) if name not in changed]
     changed += [name for name in set_env_var(config, PUBLIC_URL_ENV, PUBLIC_URL_PLACEHOLDER) if name not in changed]
     write_config(path, config)
     return changed
@@ -186,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
 
     config = load_config(config_path)
     changed = apply_auth(config, discovery=discovery, client_id=client_id)
+    changed += [name for name in apply_region(config, args.region) if name not in changed]
     write_config(config_path, config)
     print(
         json.dumps(
@@ -193,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                 "user_pool_id": pool_id,
                 "client_id": client_id,
                 "discovery_url": discovery,
+                "region": args.region,
                 "username": args.username,
                 "runtimes_updated": changed,
                 "reminder": "run with --reset-placeholders before committing agentcore/agentcore.json",

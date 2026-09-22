@@ -1,9 +1,10 @@
 # PITFALLS
 
-Sixty-one numbered traps between a Strands harness agent that works on your laptop and one that works on
-Amazon Bedrock AgentCore. P1 to P27 were found while designing this repo and are fixed in its code. P28 to
-P51 were found while building it, which is to say the hard way. P52 to P61 were found the first time the
-finished repo was deployed into a real account, which is the only way some of them could have been found.
+62 numbered traps between a Strands harness agent that works on your laptop and one that works on Amazon
+Bedrock AgentCore. P1 to P27 were found while designing this repo and are fixed in its code. P28 to P51
+were found while building it, which is to say the hard way. P52 to P61 were found the first time the
+finished repo was deployed into a real account, which is the only way some of them could have been found,
+and P62 in the review that followed.
 
 Every entry has the same four fields. **Where in this repo** names the file and function that handles it,
 so you can read the fix rather than trust this page.
@@ -13,7 +14,7 @@ Verified 2026-09-22 against `strands-harness` 0.1.1, `strands-agents` 1.56.0, `b
 
 ## Contents
 
-- [Toolchain and deploy](#toolchain-and-deploy): P1, P16, P18, P20, P39, P44, P47, P54, P55
+- [Toolchain and deploy](#toolchain-and-deploy): P1, P16, P18, P20, P39, P44, P47, P54, P55, P62
 - [Region, models, and access](#region-models-and-access): P5, P6, P7, P17, P25, P28, P29, P30
 - [State, memory, and sessions](#state-memory-and-sessions): P2, P3, P14, P23, P27, P37, P42, P43, P48
 - [Tools and the agent loop](#tools-and-the-agent-loop): P4, P10, P11, P12, P13, P19, P21, P33, P34, P50
@@ -137,6 +138,30 @@ images directly, so the check is worth keeping -- as a warning.
 **Fix.** Make it a WARN, and say in the message what it is actually for.
 **Where in this repo.** `doctor.py:_docker_arm64_check`. Pinned by
 `tests/test_doctor.py::test_docker_arm64_missing_platform_warns_because_deploy_builds_on_codebuild`.
+
+### P62. A region committed into `agentcore.json` deploys READY runtimes where every invoke fails
+
+**Symptom.** You deploy outside the region the repo was built in. Every step succeeds -- doctor passes,
+CDK creates the stack in your region, `agentcore status` shows both runtimes READY -- and then every
+single invocation comes back `error{agent unavailable: ResourceNotFoundException}`, with nothing wrong in
+the CloudWatch logs but `agent construction failed`.
+**Cause.** Two files carry a region and only one of them is generated. `agentcore/aws-targets.json` is
+written by `make setup` from your caller identity and is what CDK deploys against; the `AWS_REGION` and
+`AWS_DEFAULT_REGION` env vars in `agentcore/agentcore.json` are hand-maintained and are what the
+*container* reads. When they disagree, the memory is created in the deployed region and the session
+manager looks for it in the committed one: `AgentCoreMemorySessionManager` calls `ListEvents` inside its
+constructor, that raises, and the agent factory fails for every session. The region also reaches
+`aws_call`, which builds clients with `region_name=None` and lets botocore resolve `AWS_DEFAULT_REGION`
+-- so even with the memory fixed, the agent would investigate the wrong region. Nothing had to go wrong
+for this to happen: a literal region is a perfectly valid value that is only correct for one reader.
+**Fix.** Commit a placeholder, not a region, and pin the real one from the script that already knows it.
+The CLI's project schema types an env var value as a plain string, so a placeholder still passes
+`agentcore deploy --dry-run`; a wrong region passes too, which is why the placeholder is the safer
+default. Then check the two files against each other before the deploy rather than after it.
+**Where in this repo.** `scripts/auth_bootstrap.py:apply_region` sets both variables from `--region` on
+every runtime and `--reset-placeholders` puts them back; `doctor.py:_agentcore_json_region_check` FAILs
+on a disagreement with `run: make auth-bootstrap REGION=<region>`;
+`tests/test_repo_hygiene.py::test_agentcore_json_has_only_placeholders` keeps the committed file honest.
 
 ---
 

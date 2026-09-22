@@ -49,7 +49,7 @@ def test_placeholder_constants_match_the_committed_config():
         var["value"]
         for runtime in config["runtimes"]
         for var in runtime["envVars"]
-        if var["name"] == "COGNITO_DISCOVERY_URL"
+        if var["name"] in (auth_bootstrap.DISCOVERY_ENV, *auth_bootstrap.REGION_ENVS)
     }
     assert env_values == {auth_bootstrap.PLACEHOLDER}
 
@@ -73,14 +73,33 @@ def test_apply_auth_rewrites_every_jwt_runtime_and_env_var(config_copy):
     assert env["A2A_PUBLIC_URL"] == "REPLACED_AFTER_FIRST_DEPLOY"  # a different script's placeholder, untouched
 
 
+def test_apply_region_pins_both_region_variables_in_every_runtime(config_copy):
+    """The bug this closes: `make setup --region eu-west-1` writes eu-west-1 into `aws-targets.json`,
+    CDK deploys there, and a committed `us-west-2` in `agentcore.json` sends both containers looking for
+    the memory in a region that does not have it. Every invoke then returns `agent unavailable` (P62)."""
+    config = auth_bootstrap.load_config(config_copy)
+    assert auth_bootstrap.apply_region(config, "eu-west-1") == ["OpsInvestigator", "OpsInvestigatorA2A"]
+    auth_bootstrap.write_config(config_copy, config)
+
+    for runtime in json.loads(config_copy.read_text())["runtimes"]:
+        env = {var["name"]: var["value"] for var in runtime["envVars"]}
+        assert env["AWS_REGION"] == "eu-west-1", runtime["name"]
+        # botocore reads only AWS_DEFAULT_REGION, so the two have to move together or the harness's own
+        # Bedrock client (built with no region_name) lands somewhere else than the session manager.
+        assert env["AWS_DEFAULT_REGION"] == env["AWS_REGION"], runtime["name"]
+
+
 def test_reset_placeholders_restores_every_deployment_time_value(config_copy):
     """Including A2A_PUBLIC_URL, which `apply_auth` never touches but `smoke.sh` fills in with a URL
-    containing the account id. The reset is the one "put the file back" command, so it has to cover it."""
+    containing the account id, and the two region variables, which a deploy to anywhere but the
+    placeholder's region would otherwise leave behind. The reset is the one "put the file back"
+    command, so it has to cover every value a deploy writes."""
     pristine = json.loads(config_copy.read_text())
     config = auth_bootstrap.load_config(config_copy)
     auth_bootstrap.apply_auth(
         config, discovery=auth_bootstrap.discovery_url("us-west-2", "us-west-2_Real"), client_id="real"
     )
+    auth_bootstrap.apply_region(config, "eu-west-1")
     deployed_url = "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3A.../invocations"
     assert auth_bootstrap.set_env_var(config, auth_bootstrap.PUBLIC_URL_ENV, deployed_url) == ["OpsInvestigatorA2A"]
     auth_bootstrap.write_config(config_copy, config)

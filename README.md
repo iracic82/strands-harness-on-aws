@@ -33,7 +33,7 @@ export AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2   # both, see PITFALLS 
 
 ```bash title="manual"
 make setup     # asks STS who you are, writes agentcore/aws-targets.json and .env
-make doctor    # 14 checks; every FAIL prints the fix
+make doctor    # 15 checks; every FAIL prints the fix
 ```
 
 `make setup` is the only thing standing between a fresh clone and a working one. It calls STS for your
@@ -49,9 +49,10 @@ is not consulted on that path -- run `uv run python scripts/setup.py` directly i
 
 `make doctor` is the whole point of the repo in one command. It checks your Python, uv, Node, and CLI, then
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,
-AgentCore reachability, both models with a real one-token `ConverseStream`, CloudWatch Transaction Search,
-the CDK bootstrap stack, arm64 buildx (a WARN: the deploy builds remotely), and whether you have
-accidentally committed local transcripts.
+AgentCore reachability, the region pinned into `agentcore/agentcore.json` against the one you are
+deploying to, both models with a real one-token `ConverseStream`, CloudWatch Transaction Search, the CDK
+bootstrap stack, arm64 buildx (a WARN: the deploy builds remotely), and whether you have accidentally
+committed local transcripts.
 `doctor.py` exits 0 when every check is PASS, 1 on a WARN, and 2 on a FAIL. `make doctor` runs it with
 `--exit-on fail`, which reports 2 for a FAIL and 0 for anything else, so one optional tool missing does
 not end the chain above and a broken interpreter still does.
@@ -108,8 +109,10 @@ make status
 ```
 
 `make auth-bootstrap` creates a Cognito user pool, a public app client with `USER_PASSWORD_AUTH`, and a
-demo user, then edits `agentcore/agentcore.json` so both runtimes validate tokens from that pool. It is
-idempotent. `make deploy` runs the `@aws/agentcore` CLI, which synthesises CDK, builds two arm64 images on
+demo user, then edits `agentcore/agentcore.json` so both runtimes validate tokens from that pool. It also
+pins `REGION` into the runtimes' `AWS_REGION`/`AWS_DEFAULT_REGION` there, which is the only thing that
+sets them: the committed file carries a placeholder, and a runtime deployed with the wrong region in it
+comes up READY and then fails every invocation (PITFALLS P62). It is idempotent. `make deploy` runs the `@aws/agentcore` CLI, which synthesises CDK, builds two arm64 images on
 a native ARM CodeBuild host, pushes them to ECR, and creates the two runtimes plus the memory.
 
 Now the second deploy. The A2A agent card has to advertise its own public URL, and that URL only exists
@@ -267,15 +270,18 @@ URL. Do not expose that port.
 
 A turn is one question and the tool calls the agent makes to answer it.
 
-| | Estimate |
+| | `est_usd` |
 |---|---|
-| Typical turn | ≈ $1 |
-| Full demo (two sessions plus an A2A card fetch) | ≈ $5 |
-| Worst case for one agent invocation, from `Limits` | ≈ $8 |
+| Measured, one-line answer | ≈ $0.001 |
+| Measured, the denied-call turn in [the demo transcript](docs/img/demo-terminal.txt) | ≈ $0.009 |
+| Measured, four-cycle investigation with tool calls | ≈ $0.03 |
+| What the `Limits` allow at most, for one agent invocation | ≈ $8 |
 
-These are estimates against the Bedrock price list and have not been reconciled against a real invoice.
-The ≈ $8 figure is arithmetic on `Limits(turns=25, output_tokens=60_000, total_tokens=1_500_000)` in
-`agent.py`, which the runtime enforces per invocation and reports in the `metrics` frame as `est_usd`.
+The first three are what the `metrics` frames reported on the deployment the screenshots above come from.
+They are the harness's own estimates against the Bedrock price list and have not been reconciled against a
+real invoice. The ≈ $8 figure is not a measurement: it is arithmetic on
+`Limits(turns=25, output_tokens=60_000, total_tokens=1_500_000)` in `agent.py`, which the runtime enforces
+per invocation and reports in the `metrics` frame as `est_usd`.
 
 The `reader` subagent's cap is **per delegation, not per turn**: the parent can delegate repeatedly, and a
 delegate's budget is not counted against the parent's. So ≈ $8 is not a ceiling on what one turn can
@@ -399,7 +405,7 @@ Read in this order:
 3. [`docs/architecture.md`](docs/architecture.md) - the components and the trust boundaries.
 4. [`docs/reading-the-traces.md`](docs/reading-the-traces.md) - spans, attributes, and where cost shows up.
 5. [`docs/from-agentlab-to-this.md`](docs/from-agentlab-to-this.md) - if you did the lab.
-6. [`PITFALLS.md`](PITFALLS.md) - 51 numbered traps, each with symptom, cause, fix, and the file that
+6. [`PITFALLS.md`](PITFALLS.md) - 62 numbered traps, each with symptom, cause, fix, and the file that
    handles it.
 
 ## Configuration

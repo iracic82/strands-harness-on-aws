@@ -134,8 +134,15 @@ disappears in cloud, with no error anywhere.
 
 ## `builtin_tools`
 
-**Harness default.** `shell`, `read`, `write`, `edit`, `web_fetch`, `web_search`, `subagent`,
-`todo_write`, `search_memory`, `programmatic_tool_caller`, `retrieve_offloaded_content`.
+**Harness default.** All eight names in `strands_harness.types.agent.BuiltinToolName`: `shell`, `read`,
+`write`, `edit`, `web_fetch`, `web_search`, `programmatic_tool_caller`, `subagent`.
+
+`todo_write` (the `todos` plugin), `search_memory` (the memory subsystem) and `retrieve_offloaded_content`
+(the context manager) look like built-ins in a tool list and are not. `builtin_tools` cannot turn them off
+-- they are not in the `Literal`, so passing one of those names is a type error, not a switch -- and they
+are still live on the cloud profile. That is why the deployed agent in the README's demo calls
+`search_memory` under `{"*": False}`. None of the three can reach the network, so the boundary in
+[`architecture.md`](architecture.md) is unaffected; what changes is what you can claim to have disabled.
 
 **Why it breaks.** On a `PUBLIC` network runtime, `shell` and `web_fetch` are an exfiltration channel: any
 instruction the model picks up from a log line or a resource tag can be acted on. `write` and `edit` have

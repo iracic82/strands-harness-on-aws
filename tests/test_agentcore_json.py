@@ -7,6 +7,8 @@ from pathlib import Path
 
 from ops_investigator.tools.aws_call import DENY
 
+from scripts import auth_bootstrap
+
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app" / "ops_investigator"
 DENY_POLICY = APP / "policies" / "execution-role-deny.json"
@@ -85,8 +87,10 @@ def test_runtimes_declare_the_model_and_budget_the_harness_reads():
     for runtime in cfg["runtimes"]:
         env = {e["name"]: e["value"] for e in runtime["envVars"]}
         # platform.detect raises RuntimeConfigError in the cloud profile without a region, so every
-        # runtime has to carry one. setup.py rewrites it per deployment target.
-        assert env["AWS_REGION"] == "us-west-2", runtime["name"]
+        # runtime has to carry one. The committed value is the placeholder, not a literal region:
+        # `auth_bootstrap.apply_region` pins the real one per deployment target, and a literal here
+        # would survive a deploy to anywhere else and break every invoke in it (P62).
+        assert env["AWS_REGION"] == auth_bootstrap.PLACEHOLDER, runtime["name"]
         # And AWS_DEFAULT_REGION beside it: botocore resolves the region from AWS_DEFAULT_REGION only,
         # so a client built without an explicit region_name (the harness's own Bedrock client) would
         # otherwise have no region at all inside the container.

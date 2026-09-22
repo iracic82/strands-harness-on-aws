@@ -18,6 +18,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -27,6 +28,11 @@ from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 DEFAULT_MODEL = "bedrock/global.anthropic.claude-sonnet-4-6"
 DEFAULT_SMALL = "global.anthropic.claude-haiku-4-5-20251001-v1:0"  # the harness's hidden second model (P4)
 STATUS_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
+
+# Beside this script in this repo; absent when doctor.py is dropped into another project, which is a PASS.
+AGENTCORE_CONFIG = Path(__file__).resolve().parent / "agentcore" / "agentcore.json"
+AGENTCORE_REGION_ENVS = ("AWS_REGION", "AWS_DEFAULT_REGION")
+AGENTCORE_REGION_PLACEHOLDER = "REPLACED_BY_auth_bootstrap"  # scripts/auth_bootstrap.PLACEHOLDER
 
 USE_CASE_FORM_FIX = (
     "Anthropic models need the one-time use case form: Bedrock console > Model access > (any Anthropic model) > "
@@ -251,6 +257,49 @@ def _agentcore_region_check(clients: ClientFactory, region: str) -> Check:
     return Check("agentcore_region", "PASS", region, "")
 
 
+def _agentcore_json_region_check(region: str, config_path: Path) -> Check:
+    """The deployment config's region, against the one this run is for.
+
+    Doctor validates the environment thoroughly and the deployment config not at all, and this is the
+    one disagreement between them that nothing else surfaces: CDK deploys into `aws-targets.json`'s
+    region while the container reads `agentcore.json`'s `AWS_REGION`. When they differ, both runtimes
+    still come up READY and every single invoke then returns `agent unavailable` -- the session manager
+    looks for the memory in the wrong region and `ListEvents` raises ResourceNotFoundException inside
+    the constructor. A paid deploy is the only thing that surfaces it today (P62).
+
+    A value still on its placeholder is a PASS: doctor runs *before* `make auth-bootstrap` in the
+    documented order, and that is the command that pins the region.
+    """
+    name = "agentcore_json_region"
+    if not config_path.is_file():
+        return Check(name, "PASS", "no agentcore.json beside doctor.py", "")
+    try:
+        config = json.loads(config_path.read_text())
+    except (OSError, ValueError) as e:
+        return Check(name, "WARN", f"{type(e).__name__}: {config_path.name}", "agentcore.json is unreadable; fix it")
+    pinned = {
+        f"{runtime.get('name', '?')}.{var['name']}": var.get("value", "")
+        for runtime in config.get("runtimes", [])
+        for var in runtime.get("envVars", [])
+        if var.get("name") in AGENTCORE_REGION_ENVS
+    }
+    unset = [k for k, v in pinned.items() if v == AGENTCORE_REGION_PLACEHOLDER]
+    if not pinned or len(unset) == len(pinned):
+        return Check(name, "PASS", "placeholder; make auth-bootstrap pins it", "")
+    if not region:
+        return Check(name, "PASS", f"{sorted(set(pinned.values()))}; nothing to compare (see region_set)", "")
+    wrong = sorted(f"{k}={v}" for k, v in pinned.items() if v not in (region, AGENTCORE_REGION_PLACEHOLDER))
+    if wrong:
+        return Check(
+            name,
+            "FAIL",
+            f"{', '.join(wrong)} != {region}",
+            f"the runtimes would look for the memory in a region that does not have it (P62); "
+            f"run: make auth-bootstrap REGION={region}",
+        )
+    return Check(name, "PASS", region, "")
+
+
 def _model_check(name: str, clients: ClientFactory, region: str, model_id: str) -> Check:
     status = _model_availability(clients, region, model_id)
     if status is not None and status != "AVAILABLE":
@@ -354,6 +403,7 @@ def run(
     clients: ClientFactory | None = None,
     which: Callable[[str], str | None] = shutil.which,
     run_cmd: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    config_path: Path = AGENTCORE_CONFIG,
 ) -> list[Check]:
     clients = clients or _default_clients
     out: list[Check] = []
@@ -372,6 +422,7 @@ def run(
     out.append(_guard("use_case_form", lambda: _use_case_form_check(clients, region)))
     out.append(_guard("region_set", lambda: _region_set_check(region)))
     out.append(_guard("agentcore_region", lambda: _agentcore_region_check(clients, region)))
+    out.append(_guard("agentcore_json_region", lambda: _agentcore_json_region_check(region, config_path)))
 
     bare_model = model.split("/", 1)[-1]
     out.append(_guard("model_main", lambda: _model_check("model_main", clients, region, bare_model)))

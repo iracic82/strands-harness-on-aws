@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
+import doctor
 from scripts import verify_docs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +61,30 @@ def cloud_tokens() -> set[str]:
         if path.is_file() and path.name not in OFFLINE_SCRIPTS
     }
     return targets | scripts | {"doctor.py", *ACCOUNT_SPECIFIC}
+
+
+def doctor_check_names() -> list[str]:
+    """The checks `doctor.run` appends on the default `Container` build, with every AWS call and every
+    subprocess stubbed. Only the *names* are asked for: what the stubs answer decides PASS or WARN, and
+    `_guard` turns any surprise into a WARN rather than dropping the check, so the list is the same
+    length either way. Credentials have to succeed, because a FAIL there short-circuits the run."""
+
+    class AnyClient:
+        def __getattr__(self, operation):
+            return lambda **kw: {"Account": "1", "Arn": f"arn:aws:sts::1:assumed-role/x/{operation}"}
+
+    completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+    checks = doctor.run(
+        "us-west-2",
+        "m",
+        "s",
+        clients=lambda service, region: AnyClient(),
+        which=lambda name: f"/usr/bin/{name}",
+        run_cmd=lambda *a, **k: completed,
+    )
+    credentials = next(c for c in checks if c.name == "credentials")
+    assert credentials.status == "PASS", f"the stub no longer satisfies _credentials_check: {credentials.detail}"
+    return [c.name for c in checks]
 
 
 def in_scope() -> list[Path]:
@@ -134,6 +160,33 @@ def test_every_image_reference_exists():
             if target.startswith(("http://", "https://")):
                 continue
             assert (path.parent / target).exists(), f"{verify_docs.rel(path)} references missing image {target}"
+
+
+def test_every_count_the_documentation_quotes_matches_what_it_counts():
+    """The defect this closes: the README sold `PITFALLS.md` as "51 numbered traps" for ten entries after
+    it had 61, in the one sentence that sells it, and the docs gate could not see it -- it executes bash
+    and renders Mermaid, neither of which is a number in prose.
+
+    Each numeral gets exactly one source of truth: the `### P<n>.` headings, and the checks `doctor.run`
+    actually appends. Writing a count anywhere else in a spelling this does not match is the same defect
+    again, so the patterns are deliberately the only sanctioned way to say it.
+    """
+    pitfalls = len(re.findall(r"^### P\d+\.", (ROOT / "PITFALLS.md").read_text(), re.M))
+    assert pitfalls > 1, "PITFALLS.md has no '### P<n>.' headings; delete this test with them"
+    checks = len(doctor_check_names())
+
+    quoted = {"numbered traps": [], "PITFALLS entries": [], "doctor checks": []}
+    for path in (ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "PITFALLS.md"):
+        text = path.read_text(encoding="utf-8")
+        where = path.name
+        quoted["numbered traps"] += [(where, int(n)) for n in re.findall(r"(\d+) numbered traps", text)]
+        quoted["PITFALLS entries"] += [(where, int(n)) for n in re.findall(r"`PITFALLS\.md` \((\d+) entries\)", text)]
+        quoted["doctor checks"] += [(where, int(n)) for n in re.findall(r"(\d+) checks", text)]
+
+    expected = {"numbered traps": pitfalls, "PITFALLS entries": pitfalls, "doctor checks": checks}
+    for kind, found in quoted.items():
+        assert found, f"nothing in the docs quotes a {kind} count any more; drop it from this test"
+        assert [n for _, n in found] == [expected[kind]] * len(found), f"{kind}: {found} != {expected[kind]}"
 
 
 def test_the_vendored_cli_reference_is_the_only_document_out_of_scope():

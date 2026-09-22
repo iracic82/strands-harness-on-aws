@@ -179,6 +179,10 @@ def test_agentcore_json_has_only_placeholders():
             assert env["COGNITO_DISCOVERY_URL"] == PLACEHOLDER, name
         if "A2A_PUBLIC_URL" in env:
             assert env["A2A_PUBLIC_URL"] == PUBLIC_URL_PLACEHOLDER, name
+        # Not account-specific, but deployment-specific in exactly the same way: a region left behind
+        # from someone else's deploy is silently wrong everywhere else, so it resets with the rest (P62).
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            assert env[var] == PLACEHOLDER, f"{name}.{var}"
 
 
 # --- the patterns themselves ------------------------------------------------------------------------

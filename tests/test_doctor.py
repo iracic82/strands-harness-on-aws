@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import doctor
 
 
@@ -269,6 +271,80 @@ def test_docker_arm64_missing_platform_warns_because_deploy_builds_on_codebuild(
     c = next(c for c in checks if c.name == "docker_arm64")
     assert c.status == "WARN" and c.fix != ""
     assert doctor.worst(checks) < 2  # a WARN never stops a deploy that would have worked
+
+
+def _config(tmp_path, region_value: str):
+    """An agentcore.json with just the one field this check reads, in both runtimes."""
+    path = tmp_path / "agentcore.json"
+    path.write_text(
+        json.dumps(
+            {
+                "runtimes": [
+                    {
+                        "name": name,
+                        "envVars": [
+                            {"name": "AWS_REGION", "value": region_value},
+                            {"name": "AWS_DEFAULT_REGION", "value": region_value},
+                            {"name": "HARNESS_EFFORT", "value": "medium"},
+                        ],
+                    }
+                    for name in ("OpsInvestigator", "OpsInvestigatorA2A")
+                ]
+            }
+        )
+    )
+    return path
+
+
+def test_agentcore_json_region_disagreeing_with_the_run_is_a_fail_naming_the_fix(tmp_path):
+    """The deploy this catches: everything passes, both runtimes come up READY, and every invoke then
+    returns `agent unavailable` because the memory is in the deployed region and the container looks in
+    the committed one (P62). Nothing else in doctor reads the deployment config."""
+    checks = doctor.run(
+        "eu-west-1",
+        "m",
+        "s",
+        clients=_clients(),
+        which=_tools(),
+        run_cmd=_run_ok,
+        config_path=_config(tmp_path, "us-west-2"),
+    )
+    c = next(c for c in checks if c.name == "agentcore_json_region")
+    assert c.status == "FAIL"
+    assert "OpsInvestigator.AWS_REGION=us-west-2" in c.detail and "eu-west-1" in c.detail
+    assert "make auth-bootstrap REGION=eu-west-1" in c.fix
+
+
+def test_agentcore_json_region_passes_on_the_placeholder_and_on_a_match(tmp_path):
+    """Doctor runs before `make auth-bootstrap` in the documented order, so an unpinned config is the
+    normal state, not a finding. A config already pinned to this run's region is the other PASS."""
+    for value, region in ((doctor.AGENTCORE_REGION_PLACEHOLDER, "eu-west-1"), ("eu-west-1", "eu-west-1")):
+        checks = doctor.run(
+            region,
+            "m",
+            "s",
+            clients=_clients(),
+            which=_tools(),
+            run_cmd=_run_ok,
+            config_path=_config(tmp_path, value),
+        )
+        c = next(c for c in checks if c.name == "agentcore_json_region")
+        assert (c.status, c.fix) == ("PASS", ""), value
+
+
+def test_agentcore_json_region_passes_where_there_is_no_config(tmp_path):
+    """doctor.py is meant to be dropped into any harness project; a missing agentcore.json is not a
+    finding about the environment it is checking."""
+    checks = doctor.run(
+        "eu-west-1",
+        "m",
+        "s",
+        clients=_clients(),
+        which=_tools(),
+        run_cmd=_run_ok,
+        config_path=tmp_path / "nope.json",
+    )
+    assert next(c for c in checks if c.name == "agentcore_json_region").status == "PASS"
 
 
 def test_availability_id_strips_the_known_inference_profile_prefixes():

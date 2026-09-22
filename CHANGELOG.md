@@ -43,14 +43,16 @@ Initial release.
   `/Users/` path, or the owner's own profile name in anything git would publish -- tracked files *and*
   untracked ones that are not ignored -- and on a generated file that is tracked rather than ignored.
   gitleaks runs beside it over both history and the working tree, in CI and as a pre-commit hook, and a
-  `fresh-clone` CI job proves the clone runs with nothing but the repo. There is no allowlisted path:
-  the design history under `docs/superpowers/` uses the same placeholders as everything else.
+  `fresh-clone` CI job proves the clone runs with nothing but the repo. The only allowlist is gitleaks',
+  it is paths-only, and every entry in it is git-ignored build output -- a test asserts that with
+  `git check-ignore`. No published path is allowlisted: the design history under `docs/superpowers/` is
+  scanned with everything else, using the same placeholders.
 - **Two arm64 images** built by the generated CDK stack on a native ARM CodeBuild host, from a
   digest-pinned base.
 - **CI** on Python 3.12 and 3.14: ruff, pytest, gitleaks, an arm64 buildx build of both images, and a
   fresh-clone run of the whole suite, and a docs gate (`scripts/verify_docs.py`) that runs every runnable
   command block and parses every Mermaid diagram with mermaid-cli. 347 tests, no network.
-- **Documentation**: `README.md`, `PITFALLS.md` (61 entries), and a five-part learning path under `docs/`.
+- **Documentation**: `README.md`, `PITFALLS.md` (62 entries), and a five-part learning path under `docs/`.
 
 - **Screenshots** under `docs/img/` from the first real deployment: the two-session memory demo with a
   denied call, one invocation as an X-Ray span timeline, and the A2A agent card. Ids redacted, nothing else
@@ -100,7 +102,10 @@ Initial release.
   drain it between stream events. See PITFALLS P51.
 - The default model is `bedrock/global.anthropic.claude-sonnet-4-6`, not Sonnet 5. The Claude 5 family is
   entitled separately and was refused on the account this was built against. See PITFALLS P29.
-- Cost figures in the README (≈ $1 per turn, ≈ $5 per demo, ≈ $8 hard cap) are estimates and have not been
-  reconciled against an invoice.
+- Cost figures in the README are the harness's own `est_usd` estimates against the Bedrock price list and
+  have not been reconciled against an invoice. The measured ones are ≈ $0.001 for a one-line answer,
+  ≈ $0.009 for the denied-call turn in the committed transcript, and ≈ $0.03 for a four-cycle
+  investigation. The ≈ $8 figure is arithmetic on `Limits` for one agent invocation, not a cap on what a
+  turn can spend -- see the `reader` delegation limitation above.
 - `make setup` detects the account and region and writes `agentcore/aws-targets.json` and `.env`. Neither
   is committed; `make hygiene` (gitleaks plus `tests/test_repo_hygiene.py`) is what keeps it that way.

@@ -165,10 +165,24 @@ empty, because neither `BedrockAgentCoreApp` nor uvicorn installs a handler for 
 | `preflight model=PASS bedrock/...` | `ops_investigator.preflight` | The one-token `ConverseStream` succeeded. A WARN here carries the console fix in the same line |
 | `preflight tempdir=FAIL ...` | `ops_investigator.preflight` | P2. The workspace is not writable and every turn will fail |
 | `turn start session=... actor=... prompt_bytes=...` | `ops_investigator.http` | One per invocation. Count these against `invoke_agent` spans |
-| `guard.denied tool=aws_call reason=read-only: s3:delete_bucket is not a permitted read operation` | `ops_investigator.guard` | **The line to put on screen during a demo.** One per refusal, with the exact tool and reason |
+| `guard.denied tool=aws_call reason=read-only: lambda:get_function_configuration is not a permitted read operation` | `ops_investigator.guard` | **The line to put on screen during a demo.** One per refusal, with the exact tool and reason |
 | `agent cache over 16 entries: every cached session is mid-turn` | `ops_investigator.cache` | Concurrency higher than the cache was sized for. The cache runs over rather than killing a live turn |
 | `agent construction failed session=...` | `ops_investigator.http` | The session manager could not initialise, usually memory permissions. The caller got `agent unavailable` |
 
-`guard.denied` is the one to demo. Ask the agent to delete something, and the refusal appears in the log as
-a structured line at the same moment the model explains itself in the text stream. Two independent records
-of the same decision, one for the user and one for whoever reviews the account later.
+`guard.denied` is the one to demo, and the prompt matters. Ask for something obviously destructive --
+"delete the oldest bucket" -- and nothing appears: the model refuses first, the call is never attempted,
+and the guard never sees it. Ask for a routine-looking read that is simply not on the allowlist, `use
+aws_call lambda get_function_configuration on orders-api`, and the guard is what stops it:
+
+```
+[denied] aws_call: DENIED: read-only: lambda:get_function_configuration is not a permitted read operation
+```
+
+in the client, and at the same moment
+
+```
+guard.denied tool=aws_call reason=read-only: lambda:get_function_configuration is not a permitted read operation
+```
+
+in `make logs`. Two independent records of the same decision, one for the user and one for whoever reviews
+the account later. The README's demo table lists this prompt and the two others worth showing live.
