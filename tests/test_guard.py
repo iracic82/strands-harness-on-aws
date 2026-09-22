@@ -62,3 +62,31 @@ def test_never_confirms():
 
 def test_unknown_tools_proceed():
     assert isinstance(ReadOnlyGuard().before_tool_call(_event("search_memory", {"query": "x"})), Proceed)
+
+
+def test_non_dict_tool_input_does_not_crash():
+    r = ReadOnlyGuard().before_tool_call(_event("aws_call", "ec2:describe_instances"))
+    assert isinstance(r, Deny)
+    g = ReadOnlyGuard(denied_tools=frozenset())
+    r2 = g.before_tool_call(_event("shell", "aws ec2 describe-instances"))
+    assert isinstance(r2, Proceed)
+
+
+@pytest.mark.parametrize(
+    "cmd,expect_proceed",
+    [
+        ("aws ec2 describe-instances --filters Name=tag:Env,Values=start-prod", True),
+        ("aws --profile x --region us-west-2 ec2 describe-instances", True),
+        ("aws s3 ls s3://b", True),
+        ("aws ec2 cancel-spot-instance-requests", False),
+        ("aws ssm get-parameter --name x", False),
+        ("aws secretsmanager get-secret-value --secret-id x", False),
+        ("echo hello && aws sts get-caller-identity", True),
+        ("aws", False),
+        ('aws ec2 "describe-instances', False),  # unbalanced quote
+    ],
+)
+def test_shell_read_only_verb_allowlist(cmd, expect_proceed):
+    g = ReadOnlyGuard(denied_tools=frozenset())
+    r = g.before_tool_call(_event("shell", {"command": cmd}))
+    assert isinstance(r, Proceed if expect_proceed else Deny)

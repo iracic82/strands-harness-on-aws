@@ -7,25 +7,52 @@ interrupt; in a headless runtime nobody resumes it and the session wedges. This 
 from __future__ import annotations
 
 import logging
-import re
+import shlex
 from typing import Any
 
 from strands.hooks import BeforeToolCallEvent
 from strands.interventions import InterventionHandler
 from strands.interventions.actions import Deny, Proceed
 
-from ops_investigator.tools.aws_call import is_read_operation
+from ops_investigator.tools.aws_call import DENY, is_read_operation
 
 log = logging.getLogger("ops_investigator.guard")
 
 DANGEROUS_TOOLS: frozenset[str] = frozenset({"shell", "write", "edit", "web_fetch", "web_search"})
-# UX-level check for the local profile only; the enforced control for AWS mutation is IAM + aws_call's allowlist.
-MUTATING_AWS_CLI = re.compile(
-    r"\baws\b.*\b(create|put|delete|update|modify|terminate|run-instances|start|stop|reboot|attach|detach|"
-    r"authorize|revoke|add|remove|associate|disassociate|enable|disable|invoke|send|publish|rm|cp|sync|mv|"
-    r"assume-role|get-secret-value|get-parameter)\b",
-    re.IGNORECASE,
-)
+
+READ_VERB_PREFIXES = ("describe-", "list-", "get-", "lookup-", "search-", "query-")
+READ_VERBS = frozenset({"ls", "help"})
+# Reuse aws_call's deny table (secret-bearing "reads") in AWS CLI kebab-case spelling; aws_call's DENY is snake_case.
+SHELL_DENY = frozenset((svc, op.replace("_", "-")) for svc, op in DENY)
+
+
+def shell_is_read_only(command: str) -> bool:
+    """UX-level check for the local profile: every `aws <service> <verb>` in the command must be a read verb.
+
+    IAM and aws_call's allowlist are the enforced controls; this only improves the local dev UX by refusing
+    obviously-mutating aws CLI invocations before they run outside the AWS-API-level guard.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    i = 0
+    while i < len(tokens):
+        if tokens[i] != "aws":
+            i += 1
+            continue
+        j = i + 1
+        while j < len(tokens) and tokens[j].startswith("-"):  # skip global options (--profile x, --region=y)
+            j += 2 if "=" not in tokens[j] else 1
+        if j + 1 >= len(tokens):
+            return False
+        service, verb = tokens[j].lower(), tokens[j + 1].lower()
+        if (service, verb) in SHELL_DENY:
+            return False
+        if not (verb.startswith(READ_VERB_PREFIXES) or verb in READ_VERBS):
+            return False
+        i = j + 2
+    return True
 
 
 class ReadOnlyGuard(InterventionHandler):
@@ -41,7 +68,8 @@ class ReadOnlyGuard(InterventionHandler):
     def before_tool_call(self, event: BeforeToolCallEvent, **kwargs: Any) -> Proceed | Deny:
         tool_use = event.tool_use
         name = str(tool_use.get("name", ""))
-        inp = tool_use.get("input") or {}
+        inp = tool_use.get("input")
+        inp = inp if isinstance(inp, dict) else {}
         if name in self.denied_tools:
             return self._deny(name, f"{name} is disabled for the read-only investigator in this profile")
         if name == "aws_call":
@@ -50,6 +78,9 @@ class ReadOnlyGuard(InterventionHandler):
                 return self._deny(name, f"read-only: {service}:{op} is not a permitted read operation")
         if name == "shell":
             cmd = str(inp.get("command", ""))
-            if MUTATING_AWS_CLI.search(cmd):
-                return self._deny(name, "read-only: mutating or secret-reading aws CLI call refused")
+            if not shell_is_read_only(cmd):
+                return self._deny(
+                    name,
+                    "read-only: only aws describe/list/get/lookup/search/query (and s3 ls) are allowed from the shell",
+                )
         return Proceed()
