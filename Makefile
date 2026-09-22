@@ -19,11 +19,12 @@ AGENTCORE = npx -y @aws/agentcore@0.30.0
 setup:
 	uv run python scripts/setup.py --region $(REGION)
 
-# doctor exits 1 on WARN, 2 on FAIL; only a FAIL should stop the quickstart chain. Without the guard,
-# make collapses any non-zero recipe status to its own exit 2 and a WARN ends `make setup && make doctor`.
-# scripts/smoke.sh runs doctor.py directly and does the same test on the code it gets back.
+# Only a FAIL should stop the quickstart chain, and make collapses any non-zero recipe status to its own
+# exit 2. `--exit-on fail` does that inside doctor.py rather than with `|| [ $$? -eq 1 ]` here, which
+# would also swallow an exit 1 doctor never produced: a uv resolution error or a traceback would read as
+# a clean preflight. scripts/smoke.sh calls doctor.py directly and tests the status code itself.
 doctor:
-	uv run python doctor.py --region $(REGION) || [ $$? -eq 1 ]
+	uv run python doctor.py --region $(REGION) --exit-on fail
 
 auth-bootstrap:
 	uv run python scripts/auth_bootstrap.py --region $(REGION) --project $(PROJECT)

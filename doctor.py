@@ -2,8 +2,10 @@
 """doctor.py: preflight for running the Strands harness on AgentCore. Drop into any harness project.
 
 Usage: python doctor.py --region us-west-2 [--model bedrock/global.anthropic.claude-sonnet-4-6]
-       [--small-model ID] [--build Container|CodeZip] [--json]
+       [--small-model ID] [--build Container|CodeZip] [--json] [--exit-on status|fail]
 Exit code: 0 all PASS, 1 any WARN, 2 any FAIL. Every FAIL/WARN prints the fix. Needs only boto3.
+`--exit-on fail` reports 2 for a FAIL and 0 otherwise, for callers that treat a WARN as "carry on"
+without having to tell a WARN apart from the interpreter's own exit 1.
 """
 
 from __future__ import annotations
@@ -379,6 +381,16 @@ def worst(checks: list[Check]) -> int:
     return max((STATUS_ORDER[c.status] for c in checks), default=0)
 
 
+def exit_code(checks: list[Check], exit_on: str) -> int:
+    """`status` reports the worst check (0/1/2). `fail` reports 2 for a FAIL and 0 for anything else.
+
+    A caller that wants "stop only on a FAIL" would otherwise have to write `|| [ $? -eq 1 ]`, which
+    also swallows an exit 1 this script never produced -- a uv resolution error, an import error, an
+    unhandled traceback -- and reports a broken preflight as a clean one.
+    """
+    return (2 if worst(checks) >= STATUS_ORDER["FAIL"] else 0) if exit_on == "fail" else worst(checks)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--region", default=None)
@@ -386,6 +398,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--small-model", default=DEFAULT_SMALL)
     p.add_argument("--build", default="Container", choices=["Container", "CodeZip"])
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--exit-on",
+        default="status",
+        choices=["status", "fail"],
+        help="status: 0/1/2 for PASS/WARN/FAIL (default). fail: 2 on any FAIL, 0 otherwise",
+    )
     a = p.parse_args(argv)
     region = a.region or boto3.session.Session().region_name or ""
     checks = run(region, a.model, a.small_model, a.build)
@@ -395,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         for c in checks:
             line = f"[{c.status:4}] {c.name:20} {c.detail}"
             print(line if c.status == "PASS" else f"{line}\n       fix: {c.fix}")
-    return worst(checks)
+    return exit_code(checks, a.exit_on)
 
 
 if __name__ == "__main__":

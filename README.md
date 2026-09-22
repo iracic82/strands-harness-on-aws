@@ -49,8 +49,9 @@ is not consulted on that path -- run `uv run python scripts/setup.py` directly i
 names the account and caller ARN it is about to use, then checks the Anthropic use-case form, the region,
 AgentCore reachability, both models with a real one-token `ConverseStream`, CloudWatch Transaction Search,
 the CDK bootstrap stack, arm64 buildx, and whether you have accidentally committed local transcripts.
-`doctor.py` exits 0 when every check is PASS, 1 on a WARN, and 2 on a FAIL. `make doctor` passes a WARN
-through and stops only on a FAIL, so one optional tool missing does not end the chain above.
+`doctor.py` exits 0 when every check is PASS, 1 on a WARN, and 2 on a FAIL. `make doctor` runs it with
+`--exit-on fail`, which reports 2 for a FAIL and 0 for anything else, so one optional tool missing does
+not end the chain above and a broken interpreter still does.
 
 Now run the agent on your laptop. It talks to real Bedrock and real AWS read APIs, but nothing is deployed.
 
@@ -141,8 +142,10 @@ git checkout agentcore/agentcore.json
 
 `uv run python scripts/setup.py --reset-placeholders` does the same to the values without touching the
 CLI's original whitespace, which is what you want when the file has other local edits you are keeping.
-Either way, `make hygiene` is the check: it fails on a real Cognito pool id, an account id, an ARN, or a
-`/Users/` path in any tracked file, and it runs as part of `make lint`.
+Either way, `make hygiene` is the check. It fails on an account id, an ARN containing one, a Cognito pool
+id, a `/Users/` path, or the repo owner's own profile name, in anything git would publish -- tracked
+files and untracked ones that are not ignored -- and on a generated file that is tracked rather than
+ignored. gitleaks runs beside it over both history and the working tree. It is part of `make lint`.
 
 ## The demo
 

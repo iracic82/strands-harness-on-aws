@@ -201,6 +201,21 @@ def test_missing_global_cli_is_a_warning_not_a_failure():
     assert c.status == "WARN"
     assert "npx" in c.detail and c.fix.startswith("optional:")
     assert doctor.worst(checks) == 1  # a WARN, so the quickstart's `make setup && make doctor` goes on
+    assert doctor.exit_code(checks, "fail") == 0  # and `make doctor` (--exit-on fail) does not stop
+
+
+def test_exit_on_fail_reports_only_a_failure():
+    """`make doctor` uses it, so a WARN does not end the quickstart chain. It stays distinguishable
+    from the exit 1 an interpreter gives for a traceback, which is why the shell guard was wrong."""
+    checks = [doctor.Check("a", "PASS", "", ""), doctor.Check("b", "WARN", "", "")]
+    assert doctor.exit_code(checks, "status") == 1
+    assert doctor.exit_code(checks, "fail") == 0
+
+    checks.append(doctor.Check("c", "FAIL", "", ""))
+    assert doctor.exit_code(checks, "status") == 2
+    assert doctor.exit_code(checks, "fail") == 2
+
+    assert doctor.exit_code([], "fail") == 0 and doctor.exit_code([], "status") == 0
 
 
 def test_credentials_failure_short_circuits_and_reports_profile(monkeypatch):

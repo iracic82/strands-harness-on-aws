@@ -11,9 +11,9 @@ Every file git would publish is scanned, tracked or not: `git ls-files --cached 
 published with the rest of the repo, so it was scrubbed to the same placeholders everything else uses --
 a clone gets it, and `export-ignore` would only have hidden it from `git archive`.
 
-This gate reads the working tree, not history. A value that was committed and later removed is still in
-the object store; history was scrubbed once, before first publish, and rewriting it afterwards is the
-only way to remove one.
+This gate reads the working tree, not history. Nothing here can see a value that was committed and later
+removed; the history rewrite is a one-off step before first publish, verified with
+`git grep -E '<the literals below>' $(git rev-list --all)` returning nothing.
 """
 
 from __future__ import annotations
@@ -75,6 +75,12 @@ def _is_placeholder(match: str) -> bool:
     return EXAMPLE_ACCOUNT in match or "<your" in match
 
 
+def _literal_hits(text: str) -> list[str]:
+    """Case-insensitively: a profile name shouted in a heading is the same profile name."""
+    lowered = text.lower()
+    return [literal for literal in FORBIDDEN_LITERALS if literal.lower() in lowered]
+
+
 def test_no_account_specific_values_are_in_the_working_tree():
     bad = []
     for rel in _publishable():
@@ -85,7 +91,7 @@ def test_no_account_specific_values_are_in_the_working_tree():
             continue  # binary, or a symlink to somewhere that does not exist in this checkout
         for rx in PATTERNS:
             bad += [f"{rel}: {m.group(0)}" for m in rx.finditer(text) if not _is_placeholder(m.group(0))]
-        bad += [f"{rel}: forbidden literal {literal}" for literal in FORBIDDEN_LITERALS if literal in text]
+        bad += [f"{rel}: forbidden literal {literal}" for literal in _literal_hits(text)]
     assert bad == [], "\n".join(bad)
 
 
@@ -100,6 +106,23 @@ def test_generated_files_are_ignored():
         "app/ops_investigator/.agent/x",
     ):
         assert subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT).returncode == 0, f"{rel} must be ignored"
+
+
+def test_every_gitleaks_allowlisted_path_is_build_output_git_ignores():
+    """The allowlist exists because `--no-git` walks the working tree without reading .gitignore, and a
+    CDK synth leaves asset hashes that the generic-api-key rule reports. It may only ever name paths
+    nobody receives: if a path in it stops being git-ignored, a clone gets a directory gitleaks skips."""
+    text = (ROOT / ".gitleaks.toml").read_text()
+    assert re.search(r"^\s*regexes\s*=", text, re.M) is None, "allowlists here are paths-only by design"
+
+    blocks = re.findall(r"paths\s*=\s*\[(.*?)\]", text, re.S)
+    patterns = [m for block in blocks for m in re.findall(r"'''(.*?)'''", block)]
+    assert patterns, ".gitleaks.toml has no path allowlist; delete this test with it"
+    for pattern in patterns:
+        sample = re.sub(r"[\\^$]", "", pattern).rstrip("/") + "/probe"
+        assert subprocess.run(["git", "check-ignore", "-q", sample], cwd=ROOT).returncode == 0, (
+            f"{pattern} allowlists {sample}, which git does not ignore"
+        )
 
 
 def test_no_generated_file_is_tracked():
@@ -170,6 +193,13 @@ def test_the_patterns_catch_what_they_are_for(pattern, sample):
 )
 def test_the_patterns_leave_lookalikes_alone(pattern, sample):
     assert not pattern.search(sample)
+
+
+def test_forbidden_literals_are_found_whatever_their_case():
+    for literal in FORBIDDEN_LITERALS:
+        assert literal in _literal_hits(f"see {literal.upper()} for details")
+        assert literal in _literal_hits(literal)
+    assert _literal_hits("nothing to see here") == []
 
 
 def test_the_placeholder_account_is_allowed_and_a_real_one_is_not():

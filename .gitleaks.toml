@@ -2,11 +2,16 @@
 # tree (`--no-git`) -- the pre-commit hook runs it on staged changes, and the `secrets` CI job runs it
 # on every push with full history.
 #
-# There are deliberately no allowlists. Every path in this repo, including the design history under
-# docs/superpowers/, is published to whoever clones it, so every path is scanned under the same rules.
-# An allowlist here would be a place for a real finding to hide, and the one that was tempting --
-# silencing the placeholder account 123456789012 -- would have silenced any finding that merely
-# contained that digit run.
+# The one allowlist is paths-only and covers build output git already ignores, because `--no-git` walks
+# the working tree and does not read .gitignore: a CDK synth leaves asset hashes under
+# agentcore/cdk/cdk.out/ that the generic-api-key rule reports, and nobody ever receives them.
+# tests/test_repo_hygiene.py asserts every path in it is git-ignored, so it cannot grow to cover
+# something a clone gets.
+#
+# Nothing else is allowlisted. Every path this repo publishes, including the design history under
+# docs/superpowers/, is scanned under the same rules. An allowlist is a place for a real finding to
+# hide, and the one that was tempting -- silencing the placeholder account 123456789012 -- would have
+# silenced any finding that merely contained that digit run.
 #
 # gitleaks finds credential-shaped strings. It does not know what *this* repo's local state looks like
 # (account ids, runtime ARNs, Cognito pool ids, the owner's profile name), so tests/test_repo_hygiene.py
@@ -15,3 +20,13 @@ title = "strands-harness-on-aws"
 
 [extend]
 useDefault = true
+
+[[allowlists]]
+description = "Build output git ignores; --no-git walks it anyway. Never published, so never scanned."
+paths = [
+  '''^\.venv/''',
+  '''^agentcore/cdk/cdk\.out/''',
+  '''node_modules/''',
+  '''^\.pytest_cache/''',
+  '''^\.ruff_cache/''',
+]
