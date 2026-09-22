@@ -47,8 +47,11 @@ invoke:
 test:
 	uv run pytest
 
+# verify_docs.py comes last because it is the slow one: it runs every bash block in the docs that is not
+# tagged manual, in a throwaway copy of the checkout, and renders every Mermaid diagram in a browser.
 lint: hygiene
 	uv run ruff check . && uv run ruff format --check .
+	uv run python scripts/verify_docs.py
 
 # The public-repo gate: no account id, ARN, Cognito id, /Users path, or the owner's own profile name in
 # anything git would publish, and every file that would carry one is git-ignored.

@@ -55,20 +55,20 @@ not end the chain above and a broken interpreter still does.
 
 Now run the agent on your laptop. It talks to real Bedrock and real AWS read APIs, but nothing is deployed.
 
-```bash
+```bash title="manual"
 make dev
 ```
 
 In a second terminal:
 
-```bash
+```bash title="manual"
 make invoke PROMPT="Which AWS account and region am I looking at, and how many Lambda functions are there?"
 ```
 
 `make invoke` with no `ARN` targets the local server, generates a compliant session id, and prints the
 stream. The raw HTTP call it makes is worth seeing once, because it is the same shape AgentCore uses:
 
-```bash
+```bash title="manual"
 curl -N localhost:8080/invocations \
   -H 'Content-Type: application/json' \
   -H 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: 0123456789abcdef0123456789abcdef01234567' \

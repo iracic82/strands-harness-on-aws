@@ -91,7 +91,7 @@ The schema is versioned. Every frame carries `"v": 1`, and the mapper drops anyt
 recognise rather than putting raw Strands events on the wire. To see them literally, run the local server
 with `make dev` and then:
 
-```bash
+```bash title="manual"
 uv run python scripts/invoke.py --dev --raw --prompt "List the S3 buckets in this account."
 ```
 
