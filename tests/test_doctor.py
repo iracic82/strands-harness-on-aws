@@ -50,6 +50,17 @@ def _run_ok(args=(), **k):
     return SimpleNamespace(returncode=0, stdout="0.30.0\nlinux/arm64, linux/amd64\nv25.6.1\n", stderr="")
 
 
+class Boom:
+    """A client whose every operation raises an exception type none of doctor's own except clauses name —
+    stands in for a bug or an unanticipated response shape, to exercise `_guard`'s catch-all."""
+
+    def __getattr__(self, op):
+        def call(**kw):
+            raise RuntimeError("boom")
+
+        return call
+
+
 def test_all_pass():
     checks = doctor.run(
         "us-west-2",
@@ -60,6 +71,7 @@ def test_all_pass():
         run_cmd=_run_ok,
     )
     assert all(c.status == "PASS" for c in checks), [(c.name, c.status, c.detail) for c in checks if c.status != "PASS"]
+    assert all(c.fix == "" for c in checks)  # a PASS never carries a fix
 
 
 def test_transaction_search_inactive_is_fail():
@@ -204,6 +216,50 @@ def test_python_check_notes_tested_versions():
 def test_docker_check_skipped_for_codezip_build():
     checks = doctor.run("us-west-2", "m", "s", build="CodeZip", clients=_clients(), which=_tools(), run_cmd=_run_ok)
     assert not any(c.name == "docker_arm64" for c in checks)
+
+
+def test_docker_arm64_missing_platform_is_fail():
+    def run_cmd(args, **k):
+        from types import SimpleNamespace
+
+        if args[:2] == ["docker", "buildx"]:
+            return SimpleNamespace(returncode=0, stdout="linux/amd64\n", stderr="")
+        return _run_ok(args, **k)
+
+    checks = doctor.run("us-west-2", "m", "s", clients=_clients(), which=_tools(), run_cmd=run_cmd)
+    c = next(c for c in checks if c.name == "docker_arm64")
+    assert c.status == "FAIL" and c.fix != ""
+
+
+def test_availability_id_strips_the_known_inference_profile_prefixes():
+    for prefix in ("global.", "us.", "eu.", "apac."):
+        assert doctor._availability_id(f"{prefix}anthropic.claude-sonnet-4-6") == "anthropic.claude-sonnet-4-6"
+    assert doctor._availability_id("anthropic.claude-sonnet-4-6") == "anthropic.claude-sonnet-4-6"  # no prefix at all
+
+
+def test_credentials_malformed_response_does_not_abort_the_run():
+    checks = doctor.run(
+        "us-west-2",
+        "m",
+        "s",
+        clients=_clients({"sts": Fake({"get_caller_identity": {}})}),  # missing Account/Arn
+        which=_tools(),
+        run_cmd=_run_ok,
+    )
+    c = next(c for c in checks if c.name == "credentials")
+    assert c.status == "PASS"  # no crash even though Account/Arn are missing
+    assert "account=?" in c.detail and "arn=?" in c.detail
+    names = [c.name for c in checks]
+    assert "use_case_form" in names and "agent_dir_untracked" in names  # the rest of the run still happened
+
+
+def test_unexpected_exception_in_one_check_becomes_warn_and_others_still_run():
+    checks = doctor.run("us-west-2", "m", "s", clients=_clients({"xray": Boom()}), which=_tools(), run_cmd=_run_ok)
+    c = next(c for c in checks if c.name == "transaction_search")
+    assert c.status == "WARN" and "RuntimeError" in c.detail
+    # later checks still ran despite the earlier one blowing up
+    assert next(c for c in checks if c.name == "cdk_bootstrap").status == "PASS"
+    assert next(c for c in checks if c.name == "agent_dir_untracked").status == "PASS"
 
 
 def test_exit_code_is_worst_status():

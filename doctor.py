@@ -2,7 +2,7 @@
 """doctor.py: preflight for running the Strands harness on AgentCore. Drop into any harness project.
 
 Usage: python doctor.py --region us-west-2 [--model bedrock/global.anthropic.claude-sonnet-4-6]
-       [--build Container|CodeZip] [--json]
+       [--small-model ID] [--build Container|CodeZip] [--json]
 Exit code: 0 all PASS, 1 any WARN, 2 any FAIL. Every FAIL/WARN prints the fix. Needs only boto3.
 """
 
@@ -46,6 +46,21 @@ def _default_clients(service: str, region: str) -> Any:
     return boto3.client(service, region_name=region or None)
 
 
+def _guard(name: str, fn: Callable[[], Check]) -> Check:
+    """Any single check's own bug (a malformed AWS response the check's specific except clauses didn't
+    anticipate, a broken `which`/`run_cmd` injection, etc.) must never take down the rest of the run — convert
+    an unexpected exception into a WARN instead of letting it escape `run()`."""
+    try:
+        return fn()
+    except Exception as e:  # deliberately broad: this is the last-resort net for one check's own bug
+        return Check(
+            name,
+            "WARN",
+            f"{type(e).__name__}: {e}"[:120],
+            "unexpected error in this check; rerun with --json and report it",
+        )
+
+
 def _cmd(run_cmd: Callable[..., subprocess.CompletedProcess[str]], args: list[str]) -> tuple[int, str]:
     try:
         r = run_cmd(args, capture_output=True, text=True, timeout=30)
@@ -87,7 +102,7 @@ def _converse(clients: ClientFactory, region: str, model_id: str) -> str | None:
 def _availability_id(model_id: str) -> str:
     """Bare model id for GetFoundationModelAvailability: no provider or inference-profile prefix."""
     bare = model_id.split("/", 1)[-1]
-    for prefix in ("global.", "us.", "eu."):
+    for prefix in ("global.", "us.", "eu.", "apac."):
         if bare.startswith(prefix):
             return bare[len(prefix) :]
     return bare
@@ -111,18 +126,66 @@ def _availability_fix(model_id: str, status: str | None) -> str:
     )
 
 
-def _model_check(name: str, clients: ClientFactory, region: str, model_id: str) -> Check:
-    status = _model_availability(clients, region, model_id)
-    if status is not None and status != "AVAILABLE":
-        return Check(name, "FAIL", f"{model_id}: agreementAvailability={status}", _availability_fix(model_id, status))
-    err = _converse(clients, region, model_id)
+def _python_check() -> Check:
+    v = sys.version_info
+    ok = v >= (3, 10)
     return Check(
-        name,
-        "PASS" if err is None else "FAIL",
-        model_id if err is None else f"{model_id}: {err}",
-        "Bedrock console > Model access: enable the model (and its global/us inference profile); the harness "
-        "uses Haiku 4.5 for web_fetch/memory (P4, P25).",
+        "python",
+        "PASS" if ok else "FAIL",
+        f"{v.major}.{v.minor} (tested on 3.12 and 3.14; 3.12 recommended)",
+        "" if ok else "Install Python 3.10+ (3.12 recommended).",
     )
+
+
+def _uv_check(which: Callable[[str], str | None]) -> Check:
+    path = which("uv")
+    return Check(
+        "uv",
+        "PASS" if path else "WARN",
+        path or "missing",
+        "" if path else "curl -LsSf https://astral.sh/uv/install.sh | sh",
+    )
+
+
+def _node_check(which: Callable[[str], str | None]) -> Check:
+    path = which("node")
+    return Check(
+        "node",
+        "PASS" if path else "FAIL",
+        path or "missing",
+        "" if path else "Install Node 20+ (needed for the @aws/agentcore CLI and CDK).",
+    )
+
+
+def _agentcore_cli_check(run_cmd: Callable[..., subprocess.CompletedProcess[str]]) -> Check:
+    code, text = _cmd(run_cmd, ["agentcore", "--version"])
+    if code != 0:
+        return Check("agentcore_cli", "FAIL", "agentcore not found", "npm install -g @aws/agentcore")
+    if "Usage: agentcore [OPTIONS]" in text:  # the deprecated Python starter toolkit prints Click-style usage (P1/P20)
+        return Check(
+            "agentcore_cli",
+            "FAIL",
+            "deprecated Python starter toolkit is first on PATH",
+            "pip uninstall bedrock-agentcore-starter-toolkit; npm install -g @aws/agentcore",
+        )
+    return Check("agentcore_cli", "PASS", text.strip().splitlines()[0][:40], "")
+
+
+def _credentials_check(clients: ClientFactory, region: str, profile: str) -> Check:
+    """Runs first among the AWS checks and names the account + caller ARN + profile prominently: a wrong
+    AWS_PROFILE silently points every later check at the wrong account."""
+    try:
+        ident = clients("sts", region).get_caller_identity()
+    except (ClientError, BotoCoreError, NoCredentialsError) as e:
+        return Check(
+            "credentials",
+            "FAIL",
+            f"{type(e).__name__} profile={profile}",
+            "aws sso login --profile <profile>; export AWS_PROFILE=<profile>",
+        )
+    account = ident.get("Account", "?")
+    arn = ident.get("Arn", "?")
+    return Check("credentials", "PASS", f"account={account} arn={arn} profile={profile}", "")
 
 
 def _use_case_form_check(clients: ClientFactory, region: str) -> Check:
@@ -151,6 +214,112 @@ def _use_case_form_check(clients: ClientFactory, region: str) -> Check:
     )
 
 
+def _region_set_check(region: str) -> Check:
+    return Check(
+        "region_set",
+        "PASS" if region else "FAIL",
+        region or "unset",
+        "" if region else "export AWS_REGION=us-west-2 (P5)",
+    )
+
+
+def _agentcore_region_check(clients: ClientFactory, region: str) -> Check:
+    try:
+        clients("bedrock-agentcore-control", region).list_agent_runtimes(maxResults=1)
+    except (ClientError, BotoCoreError) as e:
+        return Check(
+            "agentcore_region",
+            "FAIL",
+            type(e).__name__,
+            f"AgentCore Runtime is not reachable in {region}; pick a supported region (P7).",
+        )
+    return Check("agentcore_region", "PASS", region, "")
+
+
+def _model_check(name: str, clients: ClientFactory, region: str, model_id: str) -> Check:
+    status = _model_availability(clients, region, model_id)
+    if status is not None and status != "AVAILABLE":
+        return Check(name, "FAIL", f"{model_id}: agreementAvailability={status}", _availability_fix(model_id, status))
+    err = _converse(clients, region, model_id)
+    return Check(
+        name,
+        "PASS" if err is None else "FAIL",
+        model_id if err is None else f"{model_id}: {err}",
+        ""
+        if err is None
+        else (
+            "Bedrock console > Model access: enable the model (and its global/us inference profile); the harness "
+            "uses Haiku 4.5 for web_fetch/memory (P4, P25)."
+        ),
+    )
+
+
+def _transaction_search_check(clients: ClientFactory, region: str) -> Check:
+    try:
+        dest = clients("xray", region).get_trace_segment_destination()
+    except (ClientError, BotoCoreError) as e:
+        return Check(
+            "transaction_search",
+            "WARN",
+            type(e).__name__,
+            "Could not query X-Ray; verify Transaction Search in the CloudWatch console (P8).",
+        )
+    active = dest.get("Status") == "ACTIVE" and dest.get("Destination") == "CloudWatchLogs"
+    return Check(
+        "transaction_search",
+        "PASS" if active else "FAIL",
+        json.dumps(dest, default=str)[:80],
+        ""
+        if active
+        else (
+            "Enable CloudWatch Transaction Search once per region: aws xray update-trace-segment-destination "
+            "--destination CloudWatchLogs (P8)"
+        ),
+    )
+
+
+def _cdk_bootstrap_check(clients: ClientFactory, region: str) -> Check:
+    try:
+        clients("cloudformation", region).describe_stacks(StackName="CDKToolkit")
+    except (ClientError, BotoCoreError):
+        return Check(
+            "cdk_bootstrap",
+            "WARN",
+            "CDKToolkit stack missing",
+            f"npx cdk bootstrap aws://<account>/{region} (agentcore deploy runs it if allowed)",
+        )
+    return Check("cdk_bootstrap", "PASS", "CDKToolkit present", "")
+
+
+def _docker_arm64_check(run_cmd: Callable[..., subprocess.CompletedProcess[str]]) -> Check:
+    code, text = _cmd(run_cmd, ["docker", "buildx", "inspect", "--bootstrap"])
+    ok = code == 0 and "linux/arm64" in text
+    return Check(
+        "docker_arm64",
+        "PASS" if ok else "FAIL",
+        "linux/arm64 available" if ok else text.strip()[-80:],
+        ""
+        if ok
+        else (
+            "AgentCore needs arm64 images. Install Docker with buildx and QEMU (docker run --privileged "
+            "tonistiigi/binfmt --install arm64) (P16)."
+        ),
+    )
+
+
+def _agent_dir_untracked_check(run_cmd: Callable[..., subprocess.CompletedProcess[str]]) -> Check:
+    code, text = _cmd(run_cmd, ["git", "ls-files", ".agent", "app/ops_investigator/.agent"])
+    clean = not text.strip()
+    return Check(
+        "agent_dir_untracked",
+        "PASS" if clean else "FAIL",
+        "clean" if clean else text.strip()[:80],
+        ""
+        if clean
+        else "Local sessions/memory are plaintext transcripts: git rm -r --cached .agent && add .agent/ to .gitignore",
+    )
+
+
 def run(
     region: str,
     model: str,
@@ -164,144 +333,32 @@ def run(
     clients = clients or _default_clients
     out: list[Check] = []
 
-    v = sys.version_info
-    out.append(
-        Check(
-            "python",
-            "PASS" if v >= (3, 10) else "FAIL",
-            f"{v.major}.{v.minor} (tested on 3.12 and 3.14; 3.12 recommended)",
-            "Install Python 3.10+ (3.12 recommended).",
-        )
-    )
-    out.append(
-        Check(
-            "uv",
-            "PASS" if which("uv") else "WARN",
-            which("uv") or "missing",
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-        )
-    )
-    out.append(
-        Check(
-            "node",
-            "PASS" if which("node") else "FAIL",
-            which("node") or "missing",
-            "Install Node 20+ (needed for the @aws/agentcore CLI and CDK).",
-        )
-    )
+    out.append(_guard("python", _python_check))
+    out.append(_guard("uv", lambda: _uv_check(which)))
+    out.append(_guard("node", lambda: _node_check(which)))
+    out.append(_guard("agentcore_cli", lambda: _agentcore_cli_check(run_cmd)))
 
-    code, text = _cmd(run_cmd, ["agentcore", "--version"])
-    if code != 0:
-        out.append(Check("agentcore_cli", "FAIL", "agentcore not found", "npm install -g @aws/agentcore"))
-    elif (
-        "Usage: agentcore [OPTIONS]" in text
-    ):  # the deprecated Python starter toolkit prints Click-style usage (P1/P20)
-        out.append(
-            Check(
-                "agentcore_cli",
-                "FAIL",
-                "deprecated Python starter toolkit is first on PATH",
-                "pip uninstall bedrock-agentcore-starter-toolkit; npm install -g @aws/agentcore",
-            )
-        )
-    else:
-        out.append(Check("agentcore_cli", "PASS", text.strip().splitlines()[0][:40], ""))
-
-    # Credentials run first among the AWS checks and name the account + caller ARN + profile prominently: a
-    # wrong AWS_PROFILE silently points every later check at the wrong account.
     profile = os.environ.get("AWS_PROFILE", "default")
-    try:
-        ident = clients("sts", region).get_caller_identity()
-        out.append(Check("credentials", "PASS", f"account={ident['Account']} arn={ident['Arn']} profile={profile}", ""))
-    except (ClientError, BotoCoreError, NoCredentialsError) as e:
-        out.append(
-            Check(
-                "credentials",
-                "FAIL",
-                f"{type(e).__name__} profile={profile}",
-                "aws sso login --profile <profile>; export AWS_PROFILE=<profile>",
-            )
-        )
+    cred = _guard("credentials", lambda: _credentials_check(clients, region, profile))
+    out.append(cred)
+    if cred.status == "FAIL":
         return out
 
-    out.append(_use_case_form_check(clients, region))
-
-    out.append(Check("region_set", "PASS" if region else "FAIL", region or "unset", "export AWS_REGION=us-west-2 (P5)"))
-
-    try:
-        clients("bedrock-agentcore-control", region).list_agent_runtimes(maxResults=1)
-        out.append(Check("agentcore_region", "PASS", region, ""))
-    except (ClientError, BotoCoreError) as e:
-        out.append(
-            Check(
-                "agentcore_region",
-                "FAIL",
-                type(e).__name__,
-                f"AgentCore Runtime is not reachable in {region}; pick a supported region (P7).",
-            )
-        )
+    out.append(_guard("use_case_form", lambda: _use_case_form_check(clients, region)))
+    out.append(_guard("region_set", lambda: _region_set_check(region)))
+    out.append(_guard("agentcore_region", lambda: _agentcore_region_check(clients, region)))
 
     bare_model = model.split("/", 1)[-1]
-    out.append(_model_check("model_main", clients, region, bare_model))
-    out.append(_model_check("model_small", clients, region, small_model))
+    out.append(_guard("model_main", lambda: _model_check("model_main", clients, region, bare_model)))
+    out.append(_guard("model_small", lambda: _model_check("model_small", clients, region, small_model)))
 
-    try:
-        dest = clients("xray", region).get_trace_segment_destination()
-        active = dest.get("Status") == "ACTIVE" and dest.get("Destination") == "CloudWatchLogs"
-        out.append(
-            Check(
-                "transaction_search",
-                "PASS" if active else "FAIL",
-                json.dumps(dest, default=str)[:80],
-                "Enable CloudWatch Transaction Search once per region: aws xray update-trace-segment-destination "
-                "--destination CloudWatchLogs (P8)",
-            )
-        )
-    except (ClientError, BotoCoreError) as e:
-        out.append(
-            Check(
-                "transaction_search",
-                "WARN",
-                type(e).__name__,
-                "Could not query X-Ray; verify Transaction Search in the CloudWatch console (P8).",
-            )
-        )
-
-    try:
-        clients("cloudformation", region).describe_stacks(StackName="CDKToolkit")
-        out.append(Check("cdk_bootstrap", "PASS", "CDKToolkit present", ""))
-    except (ClientError, BotoCoreError):
-        out.append(
-            Check(
-                "cdk_bootstrap",
-                "WARN",
-                "CDKToolkit stack missing",
-                f"npx cdk bootstrap aws://<account>/{region} (agentcore deploy runs it if allowed)",
-            )
-        )
+    out.append(_guard("transaction_search", lambda: _transaction_search_check(clients, region)))
+    out.append(_guard("cdk_bootstrap", lambda: _cdk_bootstrap_check(clients, region)))
 
     if build == "Container":
-        code, text = _cmd(run_cmd, ["docker", "buildx", "inspect", "--bootstrap"])
-        ok = code == 0 and "linux/arm64" in text
-        out.append(
-            Check(
-                "docker_arm64",
-                "PASS" if ok else "FAIL",
-                "linux/arm64 available" if ok else text.strip()[-80:],
-                "AgentCore needs arm64 images. Install Docker with buildx and QEMU (docker run --privileged "
-                "tonistiigi/binfmt --install arm64) (P16).",
-            )
-        )
+        out.append(_guard("docker_arm64", lambda: _docker_arm64_check(run_cmd)))
 
-    code, text = _cmd(run_cmd, ["git", "ls-files", ".agent", "app/ops_investigator/.agent"])
-    out.append(
-        Check(
-            "agent_dir_untracked",
-            "PASS" if not text.strip() else "FAIL",
-            "clean" if not text.strip() else text.strip()[:80],
-            "Local sessions/memory are plaintext transcripts: git rm -r --cached .agent && add .agent/ to .gitignore",
-        )
-    )
+    out.append(_guard("agent_dir_untracked", lambda: _agent_dir_untracked_check(run_cmd)))
     return out
 
 
