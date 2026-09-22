@@ -111,6 +111,8 @@ def aws_call(
                 "and never secret-bearing reads (S3 objects, SSM parameters, DynamoDB items, ...).",
             }
         )
+    service = service.strip().lower()
+    operation = operation.strip().lower()
     if not _budget.take(state, "aws_call", CALL_BUDGET):
         return json.dumps(
             {"error": "budget_exhausted", "hint": f"{CALL_BUDGET} AWS calls per turn; summarise what you have."}
@@ -138,7 +140,7 @@ def aws_call(
                 "region": region,
                 "data": capped,
                 "truncated": truncated,
-                "returned": len(data) if isinstance(data, (list, dict)) else 1,
+                "returned": len(data) if isinstance(data, (list, dict)) else (0 if data is None else 1),
             },
             default=str,
         )
@@ -147,5 +149,5 @@ def aws_call(
         return json.dumps(
             {"error": f"{code}: {e.response.get('Error', {}).get('Message', '')}"[:500], "hint": _hint_for(code)}
         )
-    except (BotoCoreError, ValueError, TypeError, AttributeError) as e:
+    except (BotoCoreError, ValueError, TypeError, AttributeError, KeyError) as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"[:500], "hint": _hint_for("")})

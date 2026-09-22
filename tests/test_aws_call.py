@@ -13,8 +13,6 @@ from ops_investigator.tools import _clients
 # (via sys.modules) so `mod.DENY`/`mod.OUTPUT_CAP`/etc. below see the module, not the re-exported tool.
 mod = importlib.import_module("ops_investigator.tools.aws_call")
 
-SESSION = {"session_id": "s" * 33, "actor_id": "igor"}
-
 
 def _call(**kw):
     return mod.aws_call._tool_func(**kw)
@@ -78,6 +76,36 @@ def test_success_path_and_jmespath(monkeypatch):
     )
     assert out["data"] == ["us-west-2", "eu-west-1"]
     assert out["truncated"] is False
+
+
+def test_service_and_operation_normalized_before_the_call(monkeypatch):
+    client = _stubbed("ec2", "us-west-2")
+    stub = Stubber(client)
+    stub.add_response("describe_regions", {"Regions": [{"RegionName": "us-west-2"}]}, {})
+    stub.activate()
+    monkeypatch.setattr(_clients, "make_client", lambda *a, **k: client)
+    out = json.loads(_call(service=" EC2 ", operation=" Describe_Regions", tool_context=_ctx()))
+    assert out["service"] == "ec2"
+    assert out["operation"] == "describe_regions"
+    assert out["data"]["Regions"][0]["RegionName"] == "us-west-2"
+
+
+def test_unknown_operation_returns_json_error_not_exception(monkeypatch):
+    client = _stubbed("ec2", "us-west-2")
+    monkeypatch.setattr(_clients, "make_client", lambda *a, **k: client)
+    out = json.loads(_call(service="ec2", operation="describe_nothing", tool_context=_ctx()))
+    assert out["error"].startswith("KeyError")
+
+
+def test_returned_is_zero_when_jmespath_matches_nothing(monkeypatch):
+    client = _stubbed("ec2", "us-west-2")
+    stub = Stubber(client)
+    stub.add_response("describe_regions", {"Regions": [{"RegionName": "us-west-2"}]}, {})
+    stub.activate()
+    monkeypatch.setattr(_clients, "make_client", lambda *a, **k: client)
+    out = json.loads(_call(service="ec2", operation="describe_regions", query="NoSuchTopLevelKey", tool_context=_ctx()))
+    assert out["data"] is None
+    assert out["returned"] == 0
 
 
 def test_output_cap(monkeypatch):
