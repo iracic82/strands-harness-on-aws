@@ -3367,3 +3367,93 @@ echo "== teardown? run: make destroy   (kept up for the demo by default)"
 - **Spec coverage:** P1–P27 each have a handling task (P1/P20 → Task 10; P2/P23 → Tasks 1, 6; P3 → Task 6; P4/P25 → Tasks 8, 10; P5 → Tasks 1, 8; P6 → Task 1; P7/P8/P16 → Task 10/11; P9 → Tasks 8, 12; P10 → Task 5; P11 → Task 6 note (escape hatch is an `HARNESS_BOTO_READ_TIMEOUT` branch in `platform.detect`/`build_agent`; if time is short, ship the default string path and record P11 as "documented" in PITFALLS); P12 → Task 6 test; P13 → Task 1 MCP config; P14 → Task 6/8; P15/P19 → docs; P17 → docs; P18 → Tasks 11, 13; P21 → Task 6; P22 → Task 9; P24 → Task 2; P26 → Tasks 3, 11; P27 → Task 12 demo).
 - **Placeholders:** none of "TBD/TODO"; the only deliberate runtime placeholders are the `REPLACED_BY_auth_bootstrap` / `REPLACED_AFTER_FIRST_DEPLOY` strings in `agentcore.json`, which scripts rewrite.
 - **Type consistency:** `platform.detect(session_id, actor_id, env)`, `build_agent(session_id, actor_id, env)`, `actor_from_headers(headers, profile=, payload_actor=)`, `sse.frame/map_event/metrics_frame`, `AgentCache.get_or_create`, `LIMITS`/`READER_LIMITS` names match across Tasks 1–12. `AWS_TOOLS`/`AWS_TOOL_NAMES` defined in Task 4 and used in Tasks 6 and 11.
+
+---
+
+### Task 16: "Everything we say works" gate (README commands, visuals, screenshots)
+
+**Files:**
+- Create: `scripts/verify_docs.py`, `docs/img/` (screenshots from the smoke run), `tests/test_docs_commands.py`
+- Modify: `README.md`, `docs/*.md` (Mermaid diagrams), `.github/workflows/ci.yml`
+
+**Rules:**
+- Every fenced `bash` block in `README.md` and `docs/*.md` is either executed verbatim by `scripts/verify_docs.py` (blocks tagged ```` ```bash ```` ) or explicitly marked ```` ```bash title="manual" ```` when it needs the owner's account or interactive input; manual blocks are executed by hand during Task 15 and the transcript is saved to `docs/img/<name>.txt`.
+- Diagrams are Mermaid (`flowchart` / `sequenceDiagram`) inside the markdown so GitHub renders them; `verify_docs.py` validates each Mermaid block with `npx -y @mermaid-js/mermaid-cli -i - -o /tmp/x.svg` (or skips with a WARN when npx is unavailable in CI).
+- Screenshots: `docs/img/demo-terminal.png` (session A/B from `demo.sh`), `docs/img/cloudwatch-trace.png` (the `invoke_agent ops-investigator` span tree in CloudWatch GenAI Observability), `docs/img/agent-card.png` (browser view of `/.well-known/agent-card.json`). Captured during Task 15 with the Chrome tools; each referenced from README.
+
+- [ ] **Step 1: `scripts/verify_docs.py`**
+
+```python
+#!/usr/bin/env python3
+"""Run every ```bash block in README.md and docs/*.md that is not marked title="manual"; validate Mermaid blocks."""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+FENCE = re.compile(r"```(\w+)([^\n]*)\n(.*?)```", re.S)
+
+
+def blocks(path: Path):
+    for lang, attrs, body in FENCE.findall(path.read_text()):
+        yield lang, attrs.strip(), body
+
+
+def main() -> int:
+    failures = 0
+    for md in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:
+        for lang, attrs, body in blocks(md):
+            if lang == "bash" and 'title="manual"' not in attrs:
+                r = subprocess.run(["bash", "-euo", "pipefail", "-c", body], cwd=ROOT, capture_output=True, text=True, timeout=600)
+                status = "ok" if r.returncode == 0 else "FAIL"
+                print(f"[{status}] {md.name}: {body.strip().splitlines()[0][:70]}")
+                if r.returncode:
+                    failures += 1
+                    print(r.stdout[-800:], r.stderr[-800:], sep="\n")
+            elif lang == "mermaid":
+                if not shutil.which("npx"):
+                    print(f"[warn] {md.name}: mermaid not validated (no npx)")
+                    continue
+                r = subprocess.run(["npx", "-y", "@mermaid-js/mermaid-cli", "-i", "/dev/stdin", "-o", "/tmp/verify-docs.svg"],
+                                   input=body, capture_output=True, text=True, timeout=300)
+                print(f"[{'ok' if r.returncode == 0 else 'FAIL'}] {md.name}: mermaid block")
+                failures += 1 if r.returncode else 0
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 2: `tests/test_docs_commands.py`** asserts that every `bash` block in README is either runnable offline or marked manual, and that every `docs/img/*.png` referenced in markdown exists:
+
+```python
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_every_image_reference_exists():
+    for md in [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]:
+        for rel in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", md.read_text()):
+            assert (md.parent / rel).exists() or (ROOT / rel).exists(), f"{md.name} references missing image {rel}"
+
+
+def test_readme_has_no_untagged_cloud_commands():
+    text = (ROOT / "README.md").read_text()
+    for attrs, body in re.findall(r"```bash([^\n]*)\n(.*?)```", text, re.S):
+        if any(tok in body for tok in ("agentcore deploy", "make deploy", "auth_bootstrap", "invoke.py --arn arn:")):
+            assert 'title="manual"' in attrs, f"cloud command must be tagged manual:\n{body[:120]}"
+```
+
+- [ ] **Step 3: Wire `uv run python scripts/verify_docs.py` into `make lint` and the CI `test` job.**
+
+- [ ] **Step 4: During Task 15**, capture the three screenshots with the Chrome tools, save under `docs/img/`, and paste the `demo.sh` transcript into `docs/img/demo-terminal.txt`. Commit → `git add -A && git commit -m "docs: verified commands, Mermaid diagrams, and smoke screenshots"`.
