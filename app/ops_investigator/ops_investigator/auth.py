@@ -30,9 +30,12 @@ def _jwt_claims(token: str) -> dict:
         raise ActorError("Authorization bearer token is not a JWT (expected three dot-separated segments).")
     payload = parts[1] + "=" * (-len(parts[1]) % 4)
     try:
-        return json.loads(base64.urlsafe_b64decode(payload.encode()))
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode()))
     except (ValueError, UnicodeDecodeError) as e:
         raise ActorError("Authorization bearer token payload is not valid base64url JSON.") from e
+    if not isinstance(claims, dict):
+        raise ActorError("Authorization bearer token payload is not a JSON object.")
+    return claims
 
 
 def _validate(actor: str) -> str:
@@ -49,6 +52,9 @@ def actor_from_headers(headers: Mapping[str, str], *, profile: str, payload_acto
                 "Missing Authorization: Bearer <jwt>. The runtime is configured for CUSTOM_JWT; get a token with "
                 "`make token` (scripts/token.py) and pass it on every invoke."
             )
-        return _validate(str(_jwt_claims(raw.split(" ", 1)[1].strip()).get("sub", "")))
+        sub = _jwt_claims(raw.split(" ", 1)[1].strip()).get("sub")
+        if not isinstance(sub, str):
+            raise ActorError("JWT `sub` claim must be a string.")
+        return _validate(sub)
     hdr = _header(headers, "X-Actor-Id")
     return _validate(hdr or payload_actor or "local-dev")

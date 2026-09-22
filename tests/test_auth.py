@@ -7,11 +7,16 @@ import pytest
 from ops_investigator import auth
 
 
-def _jwt(claims: dict) -> str:
-    def b64(d: dict) -> str:
-        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+def _b64(obj) -> str:
+    return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
 
-    return f"{b64({'alg': 'RS256'})}.{b64(claims)}.sig"
+
+def _jwt_with_payload(payload) -> str:
+    return f"{_b64({'alg': 'RS256'})}.{_b64(payload)}.sig"
+
+
+def _jwt(claims: dict) -> str:
+    return _jwt_with_payload(claims)
 
 
 def test_cloud_actor_from_sub():
@@ -45,3 +50,21 @@ def test_local_fallbacks():
     assert auth.actor_from_headers({"X-Actor-Id": "igor"}, profile="local") == "igor"
     assert auth.actor_from_headers({}, profile="local", payload_actor="p") == "p"
     assert auth.actor_from_headers({}, profile="local") == "local-dev"
+
+
+def test_cloud_payload_not_a_json_object():
+    tok = _jwt_with_payload(["not", "an", "object"])
+    with pytest.raises(auth.ActorError, match="JSON object"):
+        auth.actor_from_headers({"Authorization": f"Bearer {tok}"}, profile="cloud")
+
+
+@pytest.mark.parametrize("bad_sub", [True, 12345])
+def test_cloud_sub_must_be_string(bad_sub):
+    tok = _jwt({"sub": bad_sub})
+    with pytest.raises(auth.ActorError, match="sub"):
+        auth.actor_from_headers({"Authorization": f"Bearer {tok}"}, profile="cloud")
+
+
+def test_local_empty_actor_header_falls_back():
+    assert auth.actor_from_headers({"X-Actor-Id": ""}, profile="local", payload_actor="p") == "p"
+    assert auth.actor_from_headers({"X-Actor-Id": ""}, profile="local") == "local-dev"
