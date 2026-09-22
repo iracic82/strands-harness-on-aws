@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.agent/
+.env
+.env.local
+node_modules/
+cdk.out/
+.DS_Store
