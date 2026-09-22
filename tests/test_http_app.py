@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from bedrock_agentcore.runtime.models import PingStatus
-from ops_investigator import http_app, platform
+from ops_investigator import agent, http_app, platform
 
 SESSION = "s" * 33
 
@@ -42,9 +43,15 @@ async def _collect(gen) -> list[dict]:
     return [frame async for frame in gen]
 
 
-def test_limits_are_the_agent_limits():
+def test_constants():
     assert http_app.MAX_PROMPT_BYTES == 32_768 and http_app.MIN_SESSION_LEN == 33
-    assert http_app.MAX_SECONDS == 600.0
+    assert http_app.LIMITS is agent.LIMITS
+    assert http_app.MAX_SECONDS == float(os.environ.get("HARNESS_MAX_SECONDS", "600"))
+
+
+def test_max_seconds_falls_back_when_the_env_value_is_not_a_number():
+    assert http_app._max_seconds("42.5") == 42.5
+    assert http_app._max_seconds("ten minutes") == http_app.DEFAULT_MAX_SECONDS == 600.0
 
 
 def test_invoke_is_the_registered_entrypoint():
@@ -133,11 +140,13 @@ async def test_invoke_uses_one_event_mapper_per_turn(monkeypatch):
 async def test_invoke_bad_payload_yields_error():
     frames = await _collect(http_app.invoke({"nope": 1}, _ctx()))
     assert frames[0]["type"] == "error" and "prompt" in frames[0]["message"]
+    assert frames[-1]["type"] == "done"
 
 
 async def test_invoke_short_session_rejected():
     frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(session_id="short")))
     assert frames[0]["type"] == "error" and "33" in frames[0]["hint"]
+    assert frames[-1]["type"] == "done"
 
 
 async def test_invoke_cloud_without_authorization_yields_error(monkeypatch, cloud_env):
@@ -145,6 +154,7 @@ async def test_invoke_cloud_without_authorization_yields_error(monkeypatch, clou
     http_app.CACHE.clear()
     frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx()))
     assert frames[0]["type"] == "error" and "Authorization" in frames[0]["message"]
+    assert frames[-1]["type"] == "done"
 
 
 async def test_invoke_actor_mismatch(monkeypatch):
@@ -152,7 +162,10 @@ async def test_invoke_actor_mismatch(monkeypatch):
     ctx = _ctx(headers={"X-Actor-Id": "igor"})
     await _collect(http_app.invoke({"prompt": "x"}, ctx))
     frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "someone-else"})))
-    assert frames == [{"v": 1, "type": "error", "message": "actor_mismatch", "hint": frames[0]["hint"]}]
+    assert frames == [
+        {"v": 1, "type": "error", "message": "actor_mismatch", "hint": frames[0]["hint"]},
+        {"v": 1, "type": "done"},
+    ]
     assert "session" in frames[0]["hint"]
 
 
@@ -163,7 +176,8 @@ async def test_invoke_agent_construction_failure_fails_closed(monkeypatch):
     monkeypatch.setattr(http_app, "build_agent", boom)
     http_app.CACHE.clear()
     frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
-    assert frames[0]["type"] == "error" and frames[0]["message"] == "agent unavailable: RuntimeError"
+    assert [f["type"] for f in frames] == ["error", "done"]
+    assert frames[0]["message"] == "agent unavailable: RuntimeError"
     assert SESSION not in http_app.CACHE
 
 
@@ -181,7 +195,7 @@ async def test_invoke_busy_session_rejected(monkeypatch):
     first = asyncio.create_task(_collect(http_app.invoke({"prompt": "x"}, ctx)))
     await started.wait()
     frames = await _collect(http_app.invoke({"prompt": "x"}, ctx))
-    assert frames[0]["type"] == "error" and frames[0]["message"] == "busy"
+    assert [f["type"] for f in frames] == ["error", "done"] and frames[0]["message"] == "busy"
     release.set()
     assert [f["type"] for f in await first] == ["metrics", "done"]
 
@@ -222,6 +236,56 @@ async def test_invoke_wall_clock(monkeypatch):
     frames = await _collect(http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})))
     assert frames[-2]["type"] == "error" and "timeout" in frames[-2]["message"]
     assert frames[-1]["type"] == "done"
+
+
+async def test_invoke_wall_clock_with_a_slow_consumer(monkeypatch):
+    """The deadline must never span a `yield`: a slow consumer would otherwise take the cancellation,
+    skip the error frame, and leave the turn lock held so every later request answers `busy`."""
+
+    class ChattyAgent(FakeAgent):
+        async def stream_async(self, prompt, **kw):
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                yield {"data": "tick"}
+            yield {"result": _result()}
+
+    _use(monkeypatch, ChattyAgent([]))
+    monkeypatch.setattr(http_app, "MAX_SECONDS", 0.05)
+    frames = []
+    async for frame in http_app.invoke({"prompt": "x"}, _ctx(headers={"X-Actor-Id": "igor"})):
+        frames.append(frame)
+        await asyncio.sleep(0.02)  # a consumer that is slower than the agent, e.g. a stalled SSE client
+    assert [f["type"] for f in frames[-2:]] == ["error", "done"]
+    assert "timeout" in frames[-2]["message"]
+    assert not http_app.CACHE.lock(SESSION).locked()
+
+
+async def test_cache_never_evicts_a_session_that_is_mid_turn():
+    closed = []
+
+    def agent_for(name):
+        return SimpleNamespace(session_manager=SimpleNamespace(close=lambda: closed.append(name)))
+
+    cache = http_app.AgentCache(maxsize=1)
+    await cache.get_or_create("busy-session", "igor", lambda: agent_for("busy-session"))
+    async with cache.lock("busy-session"):  # a turn is running on it
+        await cache.get_or_create("s2", "igor", lambda: agent_for("s2"))
+        assert "busy-session" in cache and "s2" in cache and closed == []  # over maxsize, nothing killed
+    await cache.get_or_create("s3", "igor", lambda: agent_for("s3"))
+    assert closed == ["busy-session", "s2"]  # free again, so both trim away in LRU order
+    assert "busy-session" not in cache and list(cache._items) == ["s3"]
+
+
+async def test_cache_closes_evicted_agents_off_the_event_loop():
+    seen = {}
+
+    def agent_for():
+        return SimpleNamespace(session_manager=SimpleNamespace(close=lambda: seen.update(t=threading.current_thread())))
+
+    cache = http_app.AgentCache(maxsize=1)
+    await cache.get_or_create("s1", "igor", agent_for)
+    await cache.get_or_create("s2", "igor", agent_for)
+    assert seen["t"] is not threading.main_thread()
 
 
 async def test_invoke_stream_failure_yields_error_then_done(monkeypatch):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import boto3
 import pytest
 from botocore.exceptions import ClientError
-from ops_investigator import preflight
+from ops_investigator import platform, preflight
 
 CLOUD = {"MEMORY_OPSINVESTIGATORMEMORY_ID": "m", "AWS_REGION": "us-west-2"}
 
@@ -41,11 +41,21 @@ def test_cloud_unwritable_tempdir_fails(monkeypatch, tmp_path):
 
 
 def test_model_probe_reports_error(monkeypatch):
-    monkeypatch.setattr(preflight, "converse_probe", lambda model_id, region: "AccessDeniedException")
+    monkeypatch.setattr(preflight, "converse_probe", lambda model_id, region: "AccessDeniedException: denied")
     rep = preflight.run_preflight(env=CLOUD, probe_model=True)
     model = next(c for c in rep.checks if c[0] == "model")
     assert model[1] == "WARN" and "AccessDeniedException" in model[2] and "model access" in model[2]
     assert rep.ok
+
+
+def test_model_probe_explains_an_account_level_denial(monkeypatch):
+    err = f"AccessDeniedException: anthropic.claude-sonnet-5 is {preflight.ACCOUNT_DENIED}."
+    monkeypatch.setattr(preflight, "converse_probe", lambda model_id, region: err)
+    rep = preflight.run_preflight(env={**CLOUD, "HARNESS_MODEL": "bedrock/global.anthropic.claude-sonnet-5"})
+    detail = next(c for c in rep.checks if c[0] == "model")[2]
+    assert "This account has no access to bedrock/global.anthropic.claude-sonnet-5" in detail
+    assert "Bedrock console > Model access" in detail
+    assert platform.DEFAULT_MODEL in detail  # the suggested fallback tracks the current default
 
 
 def test_model_probe_passes(monkeypatch):
@@ -70,24 +80,41 @@ def test_model_probe_strips_the_provider_prefix(monkeypatch):
     assert seen == {"id": "global.anthropic.claude-sonnet-5", "region": "us-west-2"}
 
 
-def test_converse_probe_sends_one_token_and_returns_none(monkeypatch):
-    seen = {}
+class FakeStream:
+    """Stands in for botocore's EventStream: iterable once, and closeable."""
+
+    def __init__(self):
+        self.closed = False
+        self.read = 0
+
+    def __iter__(self):
+        for event in ({"messageStart": {}}, {"messageStop": {}}):
+            self.read += 1
+            yield event
+
+    def close(self):
+        self.closed = True
+
+
+def test_converse_probe_streams_one_token_and_drains_the_stream(monkeypatch):
+    seen, stream = {}, FakeStream()
 
     class FakeClient:
-        def converse(self, **kw):
+        def converse_stream(self, **kw):
             seen.update(kw)
-            return {}
+            return {"stream": stream}
 
     monkeypatch.setattr(boto3, "client", lambda *a, **kw: FakeClient())
     assert preflight.converse_probe("model-x", "us-west-2") is None
     assert seen["modelId"] == "model-x" and seen["inferenceConfig"] == {"maxTokens": 1}
+    assert stream.read == 2 and stream.closed  # the harness's own call path, not a plain Converse
 
 
 @pytest.mark.parametrize("code", ["AccessDeniedException", "ValidationException"])
-def test_converse_probe_returns_the_error_code(monkeypatch, code):
+def test_converse_probe_returns_the_error_code_and_message(monkeypatch, code):
     class FakeClient:
-        def converse(self, **kw):
-            raise ClientError({"Error": {"Code": code}}, "Converse")
+        def converse_stream(self, **kw):
+            raise ClientError({"Error": {"Code": code, "Message": "model-x is not available"}}, "ConverseStream")
 
     monkeypatch.setattr(boto3, "client", lambda *a, **kw: FakeClient())
-    assert preflight.converse_probe("model-x", "us-west-2") == code
+    assert preflight.converse_probe("model-x", "us-west-2") == f"{code}: model-x is not available"

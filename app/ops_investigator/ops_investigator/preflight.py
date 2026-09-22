@@ -8,12 +8,14 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ops_investigator import platform
 
 log = logging.getLogger("ops_investigator.preflight")
 
-# The fix a human should apply, keyed by the Bedrock error code a 1-token Converse returns (P25).
+# The fix a human should apply, keyed by the Bedrock error code a 1-token ConverseStream returns (P25).
+ACCOUNT_DENIED = "not available for this account"
 MODEL_FIXES = {
     "AccessDeniedException": (
         "request model access in the Bedrock console and give the execution role bedrock:InvokeModel* on this model"
@@ -39,25 +41,54 @@ class PreflightReport:
 
 
 def converse_probe(model_id: str, region: str) -> str | None:
-    """1-token Converse call: the only reliable model-access check (P25). Returns error code or None."""
+    """1-token ConverseStream: the only reliable model-access check (P25). Returns `Code: message` or None.
+
+    Streaming, not `Converse`: it is the call the harness actually makes, and an account can be refused
+    ConverseStream on a model whose plain Converse succeeds.
+    """
     import boto3
     from botocore.exceptions import BotoCoreError, ClientError
 
     try:
-        boto3.client("bedrock-runtime", region_name=region).converse(
+        response = boto3.client("bedrock-runtime", region_name=region).converse_stream(
             modelId=model_id,
             messages=[{"role": "user", "content": [{"text": "ping"}]}],
             inferenceConfig={"maxTokens": 1},
         )
+        _drain(response.get("stream"))
         return None
     except ClientError as e:
-        return e.response.get("Error", {}).get("Code", "ClientError")
+        err = e.response.get("Error", {})
+        return f"{err.get('Code', 'ClientError')}: {err.get('Message', '')}".strip(": ")
     except BotoCoreError as e:
-        return type(e).__name__
+        return f"{type(e).__name__}: {e}"
+
+
+def _drain(stream: Any) -> None:
+    """Read the event stream to the end (and close it) so the connection goes back to the pool."""
+    if stream is None:
+        return
+    try:
+        for _ in stream:
+            pass
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
 
 
 def _bare_model_id(model: str) -> str:
     return model.split("/", 1)[1] if "/" in model else model
+
+
+def _model_fix(err: str, model: str) -> str:
+    code = err.split(":", 1)[0]
+    if code == "AccessDeniedException" and ACCOUNT_DENIED in err:
+        return (
+            f"This account has no access to {model}. Bedrock console > Model access (or request access via "
+            f"AWS Sales); or set HARNESS_MODEL to an available model such as {platform.DEFAULT_MODEL}"
+        )
+    return MODEL_FIXES.get(code, DEFAULT_MODEL_FIX)
 
 
 def _check_model(rep: PreflightReport, rt: platform.Runtime) -> None:
@@ -66,7 +97,7 @@ def _check_model(rep: PreflightReport, rt: platform.Runtime) -> None:
     except Exception as e:  # a broken probe must never take the container down (spec 5)
         err = type(e).__name__
     if err:
-        rep.add("model", "WARN", f"{rt.model}: {err}. Fix: {MODEL_FIXES.get(err, DEFAULT_MODEL_FIX)}.")
+        rep.add("model", "WARN", f"{rt.model}: {err[:200]}. Fix: {_model_fix(err, rt.model)}.")
     else:
         rep.add("model", "PASS", rt.model)
 

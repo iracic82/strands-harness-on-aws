@@ -22,6 +22,7 @@ def _clean_env(monkeypatch):
         "HARNESS_EFFORT",
         "ENABLE_AWS_DOCS_MCP",
         "OTEL_TRACES_EXPORTER",
+        "HARNESS_MAX_SECONDS",
     ):
         monkeypatch.delenv(k, raising=False)
     yield

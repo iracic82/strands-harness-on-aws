@@ -18,18 +18,25 @@ from ops_investigator.agent import LIMITS, build_agent
 from ops_investigator.auth import ActorError, actor_from_headers
 from ops_investigator.preflight import run_preflight
 
-try:  # the project floor is 3.10, which has no asyncio.timeout
-    from asyncio import timeout as _timeout
-except ImportError:  # pragma: no cover - 3.10 only
-    from async_timeout import timeout as _timeout
-
 log = logging.getLogger("ops_investigator.http")
 
 MAX_PROMPT_BYTES = 32_768
-MAX_SECONDS = float(os.environ.get("HARNESS_MAX_SECONDS", "600"))
+DEFAULT_MAX_SECONDS = 600.0
 MIN_SESSION_LEN = 33
 CACHE_SIZE = 16
 CLOSING_PROMPT = "You hit the budget. Summarise findings so far, likely cause, and what remains unchecked."
+
+
+def _max_seconds(raw: str) -> float:
+    """A typo in HARNESS_MAX_SECONDS must not stop the container from serving."""
+    try:
+        return float(raw)
+    except ValueError:
+        log.error("HARNESS_MAX_SECONDS=%r is not a number; using %s", raw, DEFAULT_MAX_SECONDS)
+        return DEFAULT_MAX_SECONDS
+
+
+MAX_SECONDS = _max_seconds(os.environ.get("HARNESS_MAX_SECONDS", str(DEFAULT_MAX_SECONDS)))
 
 
 class PayloadError(ValueError):
@@ -59,6 +66,7 @@ def validate_payload(payload: Any) -> dict:
 
 
 def _close(agent: Any) -> None:
+    """Blocking: the session manager flushes pending events to AgentCore. Call it off the event loop."""
     sm = getattr(agent, "session_manager", None)
     if sm is not None and hasattr(sm, "close"):
         with contextlib.suppress(Exception):
@@ -86,6 +94,7 @@ class AgentCache:
         return len(self._items)
 
     def clear(self) -> None:
+        """Drop every entry *without* closing its session manager; for tests and a hard reset only."""
         self._items.clear()
         self._build_locks.clear()
         self._build_waiters.clear()
@@ -103,6 +112,18 @@ class AgentCache:
         self._items.move_to_end(session_id)
         return agent
 
+    async def _evict(self, protect: str) -> None:
+        """Evict the oldest session that is *not* mid-turn, never the one just handed to a caller. Closing a
+        live agent would kill its stream and let a second turn interleave on the same session id, so a cache
+        whose entries are all in use runs over its size instead."""
+        while len(self._items) > self.maxsize:
+            victim = next((sid for sid, (_, _, lk) in self._items.items() if sid != protect and not lk.locked()), None)
+            if victim is None:
+                log.warning("agent cache over %d entries: every cached session is mid-turn", self.maxsize)
+                return
+            _, evicted, _ = self._items.pop(victim)
+            await asyncio.to_thread(_close, evicted)
+
     async def get_or_create(self, session_id: str, actor_id: str, factory: Callable[[], Any]) -> Any:
         agent = self._hit(session_id, actor_id)
         if agent is not None:
@@ -116,9 +137,7 @@ class AgentCache:
                     return agent
                 agent = await asyncio.to_thread(factory)  # never construct on the event loop (P14)
                 self._items[session_id] = (actor_id, agent, asyncio.Lock())
-                while len(self._items) > self.maxsize:
-                    _, (_, evicted, _) = self._items.popitem(last=False)
-                    _close(evicted)
+                await self._evict(protect=session_id)
                 return agent
         finally:
             self._build_waiters[session_id] -= 1
@@ -173,6 +192,18 @@ async def _stream(agent: Any, prompt: str, limits: dict, model: str) -> AsyncIte
 
 @app.entrypoint
 async def invoke(payload: Any, context: Any) -> AsyncIterator[dict]:
+    """Every request — a full turn or an immediate rejection — ends with exactly one `done` frame."""
+    handler = _handle(payload, context)
+    try:
+        async for frame in handler:
+            yield frame
+    finally:
+        # A consumer that walks away mid-stream (client disconnect) must not leave the turn lock held.
+        await handler.aclose()
+    yield sse.frame("done")
+
+
+async def _handle(payload: Any, context: Any) -> AsyncIterator[dict]:
     session_id = getattr(context, "session_id", None) or ""
     headers = getattr(context, "request_headers", None) or {}
     if len(session_id) < MIN_SESSION_LEN:
@@ -211,21 +242,40 @@ async def invoke(payload: Any, context: Any) -> AsyncIterator[dict]:
         yield sse.frame("error", message="busy", hint="a turn is already running on this session; wait for done")
         return
     log.info("turn start session=%s actor=%s prompt_bytes=%d", session_id, actor, len(body["prompt"].encode()))
+    # The wall clock is applied to each pull, never across a `yield`: a timeout that fired while the consumer
+    # held the generator suspended would be delivered to the consumer, skipping the cleanup below entirely.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + MAX_SECONDS
+    stream = _stream(agent, body["prompt"], LIMITS, rt.model).__aiter__()
     async with lock:
         try:
-            async with _timeout(MAX_SECONDS):
-                async for frame in _stream(agent, body["prompt"], LIMITS, rt.model):
-                    yield frame
-        except asyncio.TimeoutError:  # on 3.10 this is not the builtin TimeoutError, and async_timeout raises it
-            yield sse.frame(
-                "error",
-                message=f"timeout after {MAX_SECONDS:.0f}s",
-                hint="narrow the question or raise HARNESS_MAX_SECONDS",
-            )
+            timed_out = False
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    frame = await asyncio.wait_for(stream.__anext__(), remaining)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:  # on 3.10 this is not the builtin TimeoutError
+                    if loop.time() < deadline:
+                        raise  # someone else's timeout (a tool, a boto read) — report it as itself
+                    timed_out = True
+                    break
+                yield frame
+            if timed_out:
+                yield sse.frame(
+                    "error",
+                    message=f"timeout after {MAX_SECONDS:.0f}s",
+                    hint="narrow the question or raise HARNESS_MAX_SECONDS",
+                )
         except Exception as e:
             log.exception("turn failed session=%s", session_id)
             yield sse.frame("error", message=f"{type(e).__name__}: {e}"[:300], hint="see the runtime logs")
-    yield sse.frame("done")
+        finally:
+            await stream.aclose()
 
 
 def _configure_logging() -> None:

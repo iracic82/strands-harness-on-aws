@@ -10,7 +10,7 @@ def test_detect_local_when_memory_env_absent(tmp_path, monkeypatch):
     rt = platform.detect("s" * 33, "igor", env={"AWS_REGION": "us-west-2"})
     assert rt.profile == "local"
     assert rt.memory_id is None
-    assert rt.model == "bedrock/global.anthropic.claude-sonnet-5"
+    assert rt.model == "bedrock/global.anthropic.claude-sonnet-4-6"
     assert rt.effort == "medium"
     assert rt.workspace == platform.APP_DIR
 

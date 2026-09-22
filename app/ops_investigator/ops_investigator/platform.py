@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ops_investigator.guard import ReadOnlyGuard
 
 MEMORY_ENV = "MEMORY_OPSINVESTIGATORMEMORY_ID"
-DEFAULT_MODEL = "bedrock/global.anthropic.claude-sonnet-5"
+DEFAULT_MODEL = "bedrock/global.anthropic.claude-sonnet-4-6"  # the Claude 5 family is refused on many accounts
 DEFAULT_EFFORT = "medium"
 EFFORTS = ("auto", "off", "minimal", "low", "medium", "high", "xhigh", "max")
 APP_DIR = Path(__file__).resolve().parent.parent  # app/ops_investigator
