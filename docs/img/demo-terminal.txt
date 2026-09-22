@@ -1,0 +1,36 @@
+$ REGION=us-west-2 ARN=... CLIENT_ID=... MEMORY_ID=... DEMO_PASSWORD=... bash scripts/demo.sh
+
+== actor 18913310-c0c1-7021-d923-bf53e38525c1 (the JWT sub; memory is namespaced by it)
+== Session A
+[tool_use] search_memory(query)
+[tool_use] aws_call(operation, region, service)
+[tool_result] aws_call status=success bytes=117
+[tool_result] search_memory status=success bytes=3175
+Good — your preference is already on record. Now let me probe the correct API name for AgentCore runtimes.
+[tool_use] programmatic_tool_caller(code)
+[tool_result] aws_call status=success bytes=134
+[tool_result] aws_call status=success bytes=117
+[tool_result] aws_call status=success bytes=123
+[tool_result] aws_call status=success bytes=2778
+[tool_result] programmatic_tool_caller status=success bytes=3367
+The preference is already stored in memory. The AgentCore runtimes were successfully retrieved.
+✅ **Preference noted and already on record** — prod account `123456789012`, `us-west-2`, NAT Gateway cost = top concern.
+   [... session A continues: lists the AgentCore runtimes it was asked about; trimmed ...]
+session_id=4f86bf9d202f42949e58ac262e72ca1cc617a7ac
+== session A was 4f86bf9d202f42949e58ac262e72ca1cc617a7ac
+== waiting for AgentCore Memory extraction (asynchronous; up to 180s)
+{'text': '{"context":"AWS cost management for a specific account and region","preference":"NAT Gateway cost is the top concern for the prod account in us-west-2","categories":["AWS","cloud costs","NAT
+== memory records in /preferences/18913310-c0c1-7021-d923-bf53e38525c1/: 1
+== Session B (new session id, same actor)
+session_id=1075de53916a4e2ebcf7c95c1ba90fca42b86ff0
+From your saved memory, your **top cost concern is NAT Gateway cost** for your prod account (`123456789012`) in `us-west-2`.
+   [... session B continues with the Cost Explorer breakdown; trimmed ...]
+
+$ make invoke ARN=... TOKEN=... PROMPT="use aws_call lambda get_function_configuration on orders-api"
+
+session_id=9d1a1811b6ce44a09ad8dfbf781f559ffbb337be
+[tool_use] aws_call(operation, parameters, region, service)
+[denied] aws_call: DENIED: read-only: lambda:get_function_configuration is not a permitted read operation
+[tool_result] aws_call status=error bytes=86
+The call was **denied** by the harness policy. `lambda:GetFunctionConfiguration` is not on the permitted read-only operation list, so it cannot be executed in this environment.
+[metrics] {"cache_read_tokens": 9002, "cycles": 2, "est_usd": 0.0093, "input_tokens": 528, "output_tokens": 336, "stop_reason": "end_turn"}

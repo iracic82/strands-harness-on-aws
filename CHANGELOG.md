@@ -48,8 +48,13 @@ Initial release.
 - **Two arm64 images** built by the generated CDK stack on a native ARM CodeBuild host, from a
   digest-pinned base.
 - **CI** on Python 3.12 and 3.14: ruff, pytest, gitleaks, an arm64 buildx build of both images, and a
-  fresh-clone run of the whole suite. 322 tests, no network.
-- **Documentation**: `README.md`, `PITFALLS.md` (50 entries), and a five-part learning path under `docs/`.
+  fresh-clone run of the whole suite, and a docs gate (`scripts/verify_docs.py`) that runs every runnable
+  command block and parses every Mermaid diagram with mermaid-cli. 347 tests, no network.
+- **Documentation**: `README.md`, `PITFALLS.md` (61 entries), and a five-part learning path under `docs/`.
+
+- **Screenshots** under `docs/img/` from the first real deployment: the two-session memory demo with a
+  denied call, one invocation as an X-Ray span timeline, and the A2A agent card. Ids redacted, nothing else
+  edited.
 
 ### Pinned versions
 

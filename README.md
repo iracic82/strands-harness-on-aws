@@ -176,7 +176,7 @@ Four prompts worth showing live, and what each one proves:
 | Prompt | What it shows | Where to point |
 |---|---|---|
 | "Which account and region are you in? Use `aws_call sts get_caller_identity`." | The tool loop, and that the agent cites account and region before anything else | The `tool_use` and `tool_result` frames in the terminal |
-| "Delete the oldest S3 bucket." | Read-only enforcement. The guard denies before the call is made | `guard.denied tool=aws_call reason=...` in `make logs`, next to the model explaining its refusal |
+| "Use `aws_call lambda get_function_configuration` on orders-api." | Read-only enforcement. A routine-looking call that is not on the read allowlist reaches the guard and is denied before it is made. (An obviously destructive prompt such as "delete the oldest bucket" never gets this far: the model refuses first, so no `denied` frame appears.) | The `[denied]` frame in the client, and `guard.denied tool=aws_call reason=...` in `make logs` |
 | "Read the value of the `/prod/db/password` SSM parameter." | That "read-only" is not enough. `ssm:GetParameter` is a read by name and returns a secret, so it is in the deny table at all three layers | The `denied` frame, then a `tool_result` frame with `status=error`, and the same `guard.denied` line. The call never reaches AWS, which is the point |
 | "What did I say my top cost concern was?" (session B) | Long-term memory across sessions, namespaced by the JWT `sub` | The answer itself; `make memory-wipe MEMORY_ID=... ACTOR=...` forgets it again |
 
@@ -306,22 +306,23 @@ The agent cannot write to AWS, and that is checked three times independently.
 
 In the cloud profile there are **no egress-capable tools at all**: `shell`, `web_fetch`, `web_search`,
 `write`, and `edit` are pinned off, and the programmatic tool caller may call only the three AWS tools.
+That is what makes `networkMode: PUBLIC` defensible.
 
 One thing the agent's read-only posture does **not** cover: the conversation itself is recorded. Strands
 emits the system prompt, the user prompt, the model's reasoning, tool arguments and the answer as
 `gen_ai.*.message` span events, and they land in the runtime log group with retention *never expire*. There
-is no off switch wired up in this release — set a retention policy on both runtime log groups after your
+is no off switch wired up in this release: set a retention policy on both runtime log groups after your
 first deploy, which `scripts/smoke.sh` prints the command for (PITFALLS P61).
-That is what makes `networkMode: PUBLIC` defensible.
 
 Identity is the JWT `sub`, taken from the `Authorization` header that the AgentCore authorizer already
 validated. Memory namespaces are built from it, so a caller cannot read another caller's memory by
 claiming their id. Everyone holding a token from the allowed Cognito client shares one trust domain;
 splitting that needs per-user Cognito groups, which this repo does not do.
 
-Telemetry carries metadata only: tool names, services, operations, byte counts, durations, statuses, and
-ids. Never bodies, never env, never values. Nothing in this repo turns prompt or response capture on, and
-the SSE stream is the only place a turn's text is rendered.
+The attributes this repo sets on its spans carry metadata only: tool names, services, operations, byte
+counts, durations, statuses, and ids. The conversation text still reaches CloudWatch Logs through the
+Strands span events described above; the SSE stream and that log group are the two places a turn's text
+exists.
 
 Full detail in [`PITFALLS.md`](PITFALLS.md) and [`docs/architecture.md`](docs/architecture.md).
 
@@ -344,9 +345,30 @@ all of this; remove them by hand if you are done with the account.
 
 ## Screenshots
 
-This section is intentionally empty. Screenshots of `make doctor`, a live invoke, the CloudWatch GenAI
-Observability trace view, and the A2A card land here in a follow-up pass, under `docs/img/`. There are no
-image links yet so that nothing here renders broken.
+All three were captured from the first real deployment of this repo (Sonnet 4.6 on AgentCore Runtime in
+us-west-2). The account id and resource ids are redacted; nothing else is edited.
+
+**The demo, end to end.** Session A stores a preference, session B (new session id, same JWT `sub`) recalls
+it after AgentCore Memory has extracted it, then a deny-listed call is refused by `ReadOnlyGuard`. The
+transcript is in [`docs/img/demo-terminal.txt`](docs/img/demo-terminal.txt), trimmed where it listed the
+account's own resources.
+
+![Two sessions sharing memory, then a denied tool call](docs/img/demo-terminal.png)
+
+**One invocation as a trace.** Fetched from X-Ray with `aws xray batch-get-traces` and rendered as a
+timeline: the runtime segment, `invoke_agent`, one `execute_event_loop_cycle` per model round, and the
+`chat`, `execute_tool`, and `memory.*` spans under each. The per-call SDK client spans are hidden for
+readability. The CloudWatch console shows the same tree under X-Ray traces; the GenAI Observability view
+depends on Transaction Search delivering into `aws/spans`, which lagged by more than an hour during the
+smoke (PITFALLS P59).
+
+![The span tree of one invocation](docs/img/xray-trace.png)
+
+**The A2A agent card.** `GET /.well-known/agent-card.json` on the A2A runtime, with the Cognito bearer
+token, as the JSON the runtime returned: protocol version 1.0, JSON-RPC binding, the Cognito OpenID
+security scheme, and the two skills.
+
+![The agent card served by the A2A runtime](docs/img/agent-card.png)
 
 ## Learning path
 
