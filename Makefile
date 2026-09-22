@@ -60,11 +60,11 @@ logs:
 	$(AGENTCORE) logs --runtime $(RUNTIME)
 
 a2a-card:
-	uv run python scripts/a2a_client.py --url "$(A2A_URL)" $(if $(TOKEN),--token "$(TOKEN)",) \
+	$(REGION_ENV) uv run python scripts/a2a_client.py --url "$(A2A_URL)" $(if $(TOKEN),--token "$(TOKEN)",) \
 		$(if $(A2A_PROMPT),--prompt "$(A2A_PROMPT)",)
 
 memory-wipe:
-	uv run python scripts/memory_wipe.py --region $(REGION) --memory-id "$(MEMORY_ID)" --actor "$(ACTOR)"
+	$(REGION_ENV) uv run python scripts/memory_wipe.py --region $(REGION) --memory-id "$(MEMORY_ID)" --actor "$(ACTOR)"
 
 smoke:
 	$(REGION_ENV) REGION=$(REGION) bash scripts/smoke.sh
