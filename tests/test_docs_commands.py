@@ -6,12 +6,15 @@ block this repo runs in CI with no AWS account at all, so naming a Makefile targ
 that reaches AWS in an untagged block is a broken promise -- and the list of those targets and scripts is
 read out of the Makefile and `scripts/`, not typed out here, so one added next month is covered by
 default. Second, every image a document links to exists; today the answer is zero images, and it stays
-correct the moment the screenshots land.
+correct the moment the screenshots land. Third, and underneath both, the parser can see every fence in
+every document: a block it does not parse gets no report line at all, and a gate whose failure mode is
+silence is not a gate.
 
-The rest exercises `verify_docs.py` itself offline: that a manual block is not executed, that a runnable
-block cannot write into the checkout it was run from, and that a failing block fails the gate. The one
-thing not tested here is a real Mermaid render -- that needs node and a headless Chromium, so the script's
-argv and its no-npx path are tested instead and the rendering itself is what the CI `docs` job is for.
+The rest exercises `verify_docs.py` itself offline: the fence styles GitHub renders, that a manual block
+is not executed, that a runnable block cannot write into the checkout it was run from, and that a failing
+block fails the gate. The one thing not tested here is a real Mermaid render -- that needs node and a
+headless Chromium, so the script's argv and its no-npx path are tested instead and the rendering itself
+is what the CI `docs` job is for.
 """
 
 from __future__ import annotations
@@ -36,6 +39,13 @@ ACCOUNT_SPECIFIC = ("arn:aws", "AWS_PROFILE", "DEMO_PASSWORD", "@aws/agentcore",
 AWS_CLI = re.compile(r"^\s*aws\s+[a-z0-9-]+\s", re.M)
 
 IMAGE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+
+# Deliberately more permissive than the parser: it also matches a fence quoted into a blockquote and one
+# indented past CommonMark's three spaces, neither of which `verify_docs.blocks` opens a block on. That
+# gap is the tripwire. A fence the parser cannot see is a block with no [ok], no [FAIL] and no [manual]
+# line against it -- it ships ungated and silently, which is the one outcome this whole gate exists to
+# prevent -- so the count has to balance and the mismatch has to name the line.
+RAW_FENCE = re.compile(r"^\s*>?\s*(```|~~~)")
 
 
 def cloud_tokens() -> set[str]:
@@ -64,6 +74,20 @@ def untagged_bash() -> list[verify_docs.Block]:
     ]
 
 
+def unbalanced(path: Path) -> str:
+    """An empty string when the parser saw every fence in the file, else a message naming the lines."""
+    fences = [
+        number for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1) if RAW_FENCE.match(line)
+    ]
+    opened = [block.line for block in verify_docs.blocks(path)]
+    if len(fences) == 2 * len(opened):
+        return ""
+    return (
+        f"{verify_docs.rel(path)}: {len(fences)} fence lines at {fences}, but the parser opened "
+        f"{len(opened)} blocks at {opened}. A fence style it cannot see ships ungated."
+    )
+
+
 def write(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "sample.md"
     path.write_text(body, encoding="utf-8")
@@ -89,6 +113,17 @@ def test_no_untagged_bash_block_needs_the_owners_account():
         named = sorted(token for token in tokens if token in block.body)
         assert not named, f'{block.where} names {named}; tag it ```bash title="manual"'
         assert not AWS_CLI.search(block.body), f'{block.where} calls the AWS CLI; tag it ```bash title="manual"'
+
+
+def test_every_fence_in_the_documentation_is_one_the_parser_can_see():
+    """The tripwire. `verify_docs.blocks` understands ``` and ~~~ fences with up to three spaces of
+    indentation; it does not understand a fence quoted inside a blockquote, or one indented four spaces
+    under a nested list item. GitHub renders some of those anyway, so a bash block written that way
+    would be gated by nothing at all and nobody would notice, because the absence of a report line is
+    not a failure. Counting raw fence delimiters against the blocks the parser opened turns that
+    silence into a red test that names the file and the line."""
+    for path in in_scope():
+        assert not unbalanced(path), unbalanced(path)
 
 
 def test_every_image_reference_exists():
@@ -178,3 +213,52 @@ def test_a_fence_inside_a_block_does_not_end_it(tmp_path):
     found = verify_docs.blocks(path)
     assert [block.lang for block in found] == ["bash"]
     assert found[0].body.count("echo") == 2
+
+
+# --- the fence styles GitHub renders, which the gate therefore has to see ----------------------------
+
+
+def test_a_fence_indented_under_a_list_item_is_a_block(tmp_path):
+    """Three spaces is still a fence, and the body comes back without the list item's indentation --
+    otherwise every command in it would be run with two spaces in front of it."""
+    path = write(tmp_path, "1. do this:\n\n   ```bash\n   echo hi\n   ```\n")
+    found = verify_docs.blocks(path)
+    assert [(block.line, block.lang) for block in found] == [(3, "bash")]
+    assert found[0].body == "echo hi\n"
+    assert not unbalanced(path)
+
+
+def test_a_tilde_fence_is_a_block(tmp_path):
+    path = write(tmp_path, '# x\n\n~~~bash title="manual"\necho hi\n~~~\n')
+    found = verify_docs.blocks(path)
+    assert [(block.lang, block.attrs) for block in found] == [("bash", 'title="manual"')]
+    assert verify_docs.is_manual(found[0])
+    assert not unbalanced(path)
+
+
+def test_the_closing_fence_matches_the_opening_style_and_length(tmp_path):
+    """A longer close is legal and closes the block; a shorter one, or the other character, is content.
+    Getting this wrong would end a block early and run the rest of the document as shell."""
+    path = write(tmp_path, "# x\n\n````bash\n```\n~~~~~\necho hi\n`````\n")
+    found = verify_docs.blocks(path)
+    assert len(found) == 1
+    assert found[0].body == "```\n~~~~~\necho hi\n"
+
+
+def test_attributes_after_the_language_survive_the_parser(tmp_path):
+    path = write(tmp_path, '# x\n\n```bash title="manual" linenums="1"\necho hi\n```\n')
+    (block,) = verify_docs.blocks(path)
+    assert block.lang == "bash" and block.attrs == 'title="manual" linenums="1"'
+    assert verify_docs.is_manual(block)
+
+
+def test_inline_code_in_a_paragraph_is_not_a_fence(tmp_path):
+    path = write(tmp_path, "Set `a`, `b` and `c`.\n\n```bash\necho hi\n```\n")
+    assert [block.line for block in verify_docs.blocks(path)] == [3]
+
+
+def test_a_blockquoted_fence_is_not_parsed_but_trips_the_tripwire(tmp_path):
+    """The one fence style deliberately left unsupported. Unsupported is fine; unnoticed is not."""
+    path = write(tmp_path, "# x\n\n> ```bash\n> echo hi\n> ```\n")
+    assert verify_docs.blocks(path) == []
+    assert "2 fence lines at [3, 5]" in unbalanced(path)

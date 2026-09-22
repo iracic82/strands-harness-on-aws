@@ -8,6 +8,12 @@ Scope is `README.md`, `PITFALLS.md` and `docs/*.md`, minus `docs/agentcore-cli-A
 the vendored `@aws/agentcore` CLI reference, its bash blocks are the CLI's own examples against the
 CLI's own placeholder project, and editing them would make our copy diverge from upstream.
 
+Fences are read the way CommonMark and GitHub read them -- ``` or ~~~, three or more of them, up to
+three spaces of indentation, closing fence of the same character and at least the same length -- because
+a block this script cannot see is a block it reports nothing about, and silence is the one failure this
+gate must not have. `tests/test_docs_commands.py` counts raw fence lines against the blocks found here,
+so a style that slips past (a fence quoted into a blockquote, say) fails a test instead of shipping.
+
 Every ```bash block is a promise, and there are exactly two kinds. Either it runs here -- offline, with
 no AWS credentials, no Docker, no interactive input and no long-running server -- or it says so, with
 ```bash title="manual". A manual block is executed by hand during a real deployment and its transcript
@@ -52,9 +58,13 @@ SKIPPED = {ROOT / "docs" / "agentcore-cli-AGENTS.md": "vendored @aws/agentcore C
 # Manual by file. There are no bash blocks in PITFALLS.md today; this is what happens to the next one.
 MANUAL_FILES = {ROOT / "PITFALLS.md": "symptoms and fragments, not commands"}
 
-# Opening fence, its info string, and the body up to the closing fence. Anchored at the start of a line
-# so an indented fence inside a block does not end it.
-FENCE = re.compile(r"^```(\w*)([^\n]*)\n(.*?)^```", re.S | re.M)
+# A fence the way CommonMark, and so GitHub, reads one: up to three spaces of indentation, then three
+# or more backticks or tildes. Four spaces would be an indented code block instead, and the three-space
+# allowance is what makes a fence under a list item a fence. The gate has to see exactly what a reader
+# sees rendered -- a block the parser cannot see ships with no [ok], no [FAIL] and no [manual] line at
+# all, which is the one failure mode this whole script exists to prevent.
+FENCE_OPEN = re.compile(r"^(?P<indent> {0,3})(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)$")
+FENCE_CLOSE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*$")
 MANUAL = 'title="manual"'
 
 # Pinned like the Makefile pins the agentcore CLI: an unpinned renderer turns a green gate red on
@@ -107,12 +117,48 @@ def documents(paths: list[Path] | None = None) -> list[Path]:
     return [ROOT / "README.md", ROOT / "PITFALLS.md", *sorted((ROOT / "docs").glob("*.md"))]
 
 
+def dedent(line: str, indent: int) -> str:
+    """Drop as much of the opening fence's indentation as this line actually has: CommonMark's rule, and
+    the reason a fence under a list item yields the command rather than the command behind two spaces."""
+    return line[min(indent, len(line) - len(line.lstrip(" "))) :]
+
+
+def closes(line: str, opened: str) -> bool:
+    """A fence closes a block only with its own character and at least as many of them, so a ``` inside
+    a ````-fenced block is content and not the end of it."""
+    match = FENCE_CLOSE.match(line)
+    return bool(match) and match["fence"][0] == opened[0] and len(match["fence"]) >= len(opened)
+
+
 def blocks(path: Path) -> list[Block]:
-    text = path.read_text(encoding="utf-8")
-    return [
-        Block(path, text.count("\n", 0, match.start()) + 1, match.group(1), match.group(2).strip(), match.group(3))
-        for match in FENCE.finditer(text)
-    ]
+    """Every fenced block in a document, in order, scanned line by line rather than with one regex.
+
+    The regex version could only see a fence at column 0, spelled with backticks. An indented one under
+    a list item, a `~~~bash` one, or a closing fence longer than its opening -- all of which GitHub
+    renders as ordinary code blocks -- were invisible, and an invisible bash block is an ungated one.
+    Blockquoted fences (`> ```bash`) are still not supported; `tests/test_docs_commands.py` counts raw
+    fence lines against the blocks found here, so one of those fails loudly instead of slipping past.
+    """
+    found: list[Block] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    index = 0
+    while index < len(lines):
+        opening = FENCE_OPEN.match(lines[index])
+        # A backtick fence's info string may not contain a backtick; that rule is what keeps inline code
+        # in a paragraph (`a` `b` `c`) from being read as the start of a block.
+        if not opening or (opening["fence"][0] == "`" and "`" in opening["info"]):
+            index += 1
+            continue
+        start, indent, fence = index, len(opening["indent"]), opening["fence"]
+        lang, _, attrs = opening["info"].strip().partition(" ")
+        index += 1
+        body: list[str] = []
+        while index < len(lines) and not closes(lines[index], fence):
+            body.append(dedent(lines[index], indent))
+            index += 1
+        index += 1  # the closing fence, or one past the end of an unclosed block
+        found.append(Block(path, start + 1, lang, attrs.strip(), "".join(f"{line}\n" for line in body)))
+    return found
 
 
 def is_manual(block: Block) -> bool:
