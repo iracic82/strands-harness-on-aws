@@ -18,18 +18,31 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import urllib.parse
 import uuid
 
 import httpx
 from a2a.client import ClientConfig, create_client
 from a2a.helpers import new_text_message
-from a2a.types import Role, SendMessageRequest
+from a2a.types import AgentCard, Role, SendMessageRequest
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
-from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToDict, ParseDict
 
 PROTOCOL_VERSION = "1.0"
 TIMEOUT = 900.0  # the server's own wall clock is 600s and it reports a timeout as a task state
 CARD_FIELDS = ("name", "version", "description", "supportedInterfaces", "securitySchemes", "securityRequirements")
+
+
+def card_url_for(url: str) -> str:
+    """Where the card lives for a given A2A base URL.
+
+    The well-known path goes on the end of the *path*, not the end of the string: a deployed AgentCore
+    runtime is addressed as `.../runtimes/<arn>/invocations?qualifier=DEFAULT`, and its card is at
+    `.../invocations/.well-known/agent-card.json?qualifier=DEFAULT` (the request URI of the service's
+    own GetAgentCard operation). A plain server has no query string and is unaffected.
+    """
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit(parts._replace(path=parts.path.rstrip("/") + AGENT_CARD_WELL_KNOWN_PATH))
 
 
 def card_protocol_version(card: dict) -> str | None:
@@ -77,9 +90,14 @@ async def fetch_card(http: httpx.AsyncClient, card_url: str) -> dict:
     return card
 
 
-async def send(http: httpx.AsyncClient, url: str, prompt: str, context_id: str) -> int:
-    """One SendMessage turn. Non-streaming: the server publishes the answer as a single artifact."""
-    client = await create_client(url, ClientConfig(streaming=False, httpx_client=http))
+async def send(http: httpx.AsyncClient, card: dict, prompt: str, context_id: str) -> int:
+    """One SendMessage turn. Non-streaming: the server publishes the answer as a single artifact.
+
+    The client is built from the card we already fetched rather than from a URL, so the SDK does not
+    resolve the card a second time (and does not have to guess where it lives).
+    """
+    agent = ParseDict(card, AgentCard(), ignore_unknown_fields=True)
+    client = await create_client(agent, ClientConfig(streaming=False, httpx_client=http))
     try:
         message = new_text_message(prompt, role=Role.ROLE_USER)
         # The server uses the context id as the AgentCore session id and rejects anything under 33 chars.
@@ -91,7 +109,7 @@ async def send(http: httpx.AsyncClient, url: str, prompt: str, context_id: str) 
     return 0
 
 
-async def run(*, url: str, card_url: str, token: str | None, prompt: str | None, context_id: str) -> int:
+async def run(*, card_url: str, token: str | None, prompt: str | None, context_id: str) -> int:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     async with httpx.AsyncClient(headers=headers, timeout=TIMEOUT) as http:
         try:
@@ -106,26 +124,22 @@ async def run(*, url: str, card_url: str, token: str | None, prompt: str | None,
         if not prompt:
             return 0
         print(f"context_id={context_id}")
-        return await send(http, url, prompt, context_id)
+        return await send(http, card, prompt, context_id)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", required=True, help="A2A base URL (the card's supportedInterfaces[0].url)")
-    parser.add_argument(
-        "--card-url", default=None, help=f"override the card URL (default <url>{AGENT_CARD_WELL_KNOWN_PATH})"
-    )
+    parser.add_argument("--card-url", default=None, help="override where the card is fetched from")
     parser.add_argument("--token", default=None, help="Cognito JWT for a CUSTOM_JWT runtime")
     parser.add_argument("--prompt", default=None, help="send one message; omit to only read the card")
     parser.add_argument("--context", default=None, help="A2A context id (the session id); 33 chars minimum")
     args = parser.parse_args(argv)
     if not args.url.strip():
         parser.error("--url is empty; `make a2a-card` needs A2A_URL set to the deployed A2A endpoint")
-    url = args.url.rstrip("/")
     return asyncio.run(
         run(
-            url=url,
-            card_url=args.card_url or url + AGENT_CARD_WELL_KNOWN_PATH,
+            card_url=args.card_url or card_url_for(args.url),
             token=args.token,
             prompt=args.prompt,
             context_id=args.context or uuid.uuid4().hex + uuid.uuid4().hex[:8],

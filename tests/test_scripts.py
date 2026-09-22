@@ -15,7 +15,7 @@ from botocore.awsrequest import AWSRequest
 from ops_investigator.runtime_common import MIN_SESSION_LEN
 
 from scripts import auth_bootstrap, invoke, memory_wipe
-from scripts.a2a_client import card_protocol_version, summarize_event
+from scripts.a2a_client import card_protocol_version, card_url_for, summarize_event
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "agentcore" / "agentcore.json"
@@ -209,6 +209,19 @@ def test_invoke_refuses_an_unusable_combination(argv):
 
 
 # --- a2a_client -------------------------------------------------------------------------------------
+
+
+def test_card_url_puts_the_well_known_path_on_the_path_not_the_query():
+    """A deployed AgentCore A2A runtime is addressed with a `?qualifier=` query, and its card is at
+    `<invocations>/.well-known/agent-card.json?qualifier=...` -- the request URI of GetAgentCard."""
+    assert card_url_for("http://localhost:9000") == "http://localhost:9000/.well-known/agent-card.json"
+    assert card_url_for("http://localhost:9000/") == "http://localhost:9000/.well-known/agent-card.json"
+    assert card_url_for(
+        "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/x%2Fy/invocations?qualifier=DEFAULT"
+    ) == (
+        "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/x%2Fy/invocations"
+        "/.well-known/agent-card.json?qualifier=DEFAULT"
+    )
 
 
 def test_card_protocol_version_reads_the_1_0_shape_and_falls_back_to_0_3():
