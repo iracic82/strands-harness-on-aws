@@ -58,7 +58,7 @@
         { "name": "COGNITO_DISCOVERY_URL", "value": "REPLACED_BY_auth_bootstrap" }
       ],
       "additionalPolicies": ["arn:aws:iam::aws:policy/ReadOnlyAccess", "policies/execution-role-deny.json"],
-      "requestHeaderAllowlist": ["Authorization"],
+      "requestHeaderAllowlist": ["Authorization", "A2A-Version"],
       "authorizerType": "CUSTOM_JWT",
       "authorizerConfiguration": {
         "customJwtAuthorizer": {

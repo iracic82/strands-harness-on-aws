@@ -63,8 +63,14 @@ def test_agentcore_json_shape():
         assert runtime["codeLocation"] == "app/ops_investigator/"
         assert "policies/execution-role-deny.json" in runtime["additionalPolicies"]
         assert "arn:aws:iam::aws:policy/ReadOnlyAccess" in runtime["additionalPolicies"]
-        assert runtime["requestHeaderAllowlist"] == ["Authorization"]
+        # Authorization carries the JWT the actor id is derived from (P24). AgentCore forwards *only*
+        # the headers named here and drops the rest, so the A2A runtime has to name `A2A-Version` too:
+        # without it the SDK's `A2A-Version: 1.0` never reaches the container, the server falls back to
+        # 0.3 and answers every SendMessage with VersionNotSupportedError (P52).
+        assert "Authorization" in runtime["requestHeaderAllowlist"]
         assert runtime["authorizerType"] == "CUSTOM_JWT"
+    assert names["OpsInvestigator"]["requestHeaderAllowlist"] == ["Authorization"]
+    assert names["OpsInvestigatorA2A"]["requestHeaderAllowlist"] == ["Authorization", "A2A-Version"]
     memory = cfg["memories"][0]
     assert memory["name"] == "OpsInvestigatorMemory"
     assert memory["eventExpiryDuration"] == 30
