@@ -40,8 +40,12 @@ dev:
 
 # make invoke PROMPT="..."                      -> the local dev server
 # make invoke ARN=... TOKEN=... PROMPT="..."    -> the deployed runtime over HTTPS with a Cognito bearer
+#
+# `@`, like every recipe below that interpolates $(TOKEN): make echoes a recipe before running it, so
+# without it the whole bearer JWT is printed to the terminal, into CI logs, and into any screenshot of
+# the demo. The script still prints its session id and frames, which is the part worth seeing (P52).
 invoke:
-	$(REGION_ENV) uv run python scripts/invoke.py --region $(REGION) --prompt "$(PROMPT)" \
+	@$(REGION_ENV) uv run python scripts/invoke.py --region $(REGION) --prompt "$(PROMPT)" \
 		$(if $(ARN),--arn "$(ARN)" --transport $(TRANSPORT),--dev) $(if $(TOKEN),--token "$(TOKEN)",)
 
 test:
@@ -78,11 +82,15 @@ deploy:
 status:
 	$(AGENTCORE) status --json
 
+# Follows the live stream and never exits on its own (Ctrl+C to stop), and it shows only what is written
+# after it attaches -- an invoke that already happened is not in it. For history, read the runtime's log
+# group directly: /aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT.
 logs:
 	$(AGENTCORE) logs --runtime $(RUNTIME)
 
+# `@` for the same reason as `invoke`: this recipe interpolates the bearer JWT (P52).
 a2a-card:
-	$(REGION_ENV) uv run python scripts/a2a_client.py --url "$(A2A_URL)" $(if $(TOKEN),--token "$(TOKEN)",) \
+	@$(REGION_ENV) uv run python scripts/a2a_client.py --url "$(A2A_URL)" $(if $(TOKEN),--token "$(TOKEN)",) \
 		$(if $(A2A_PROMPT),--prompt "$(A2A_PROMPT)",)
 
 memory-wipe:

@@ -29,4 +29,8 @@ paths = [
   '''node_modules/''',
   '''^\.pytest_cache/''',
   '''^\.ruff_cache/''',
+  # Agent working files: task briefs, run logs, and the reports a cloud smoke leaves behind. A real
+  # smoke run writes bearer tokens and Cognito ids in there, which is the point of it being git-ignored
+  # -- but `--no-git` reads them anyway and fails `make hygiene` on a directory no clone ever gets.
+  '''^\.superpowers/''',
 ]

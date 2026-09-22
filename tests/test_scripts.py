@@ -425,6 +425,21 @@ def test_summarize_event_handles_each_stream_response_shape():
     assert summarize_event({"unknown": 1}) == '[event] {"unknown": 1}'
 
 
+def test_summarize_event_prints_the_artifacts_a_completed_task_carries():
+    """A non-streaming SendMessage returns the answer inside the Task, not as an artifactUpdate (P52)."""
+    completed = {
+        "task": {
+            "id": "t2",
+            "contextId": "c2",
+            "status": {"state": "TASK_STATE_COMPLETED"},
+            "artifacts": [{"name": "answer", "parts": [{"text": "the "}, {"text": "answer"}]}],
+        }
+    }
+    assert summarize_event(completed) == (
+        "[task] id=t2 context=c2 state=TASK_STATE_COMPLETED\n[artifact] answer: the answer"
+    )
+
+
 # --- memory_wipe ------------------------------------------------------------------------------------
 
 
@@ -559,3 +574,22 @@ def test_makefile_declares_every_target_phony():
     phony = set(next(line for line in lines if line.startswith(".PHONY:")).removeprefix(".PHONY:").split())
     targets = {line.split(":")[0] for line in lines if ":" in line and not line.startswith(("#", ".PHONY"))}
     assert targets == phony
+
+
+def test_no_makefile_recipe_echoes_the_token():
+    """make prints a recipe before it runs it, so a recipe that interpolates $(TOKEN) puts a live bearer
+    JWT in the terminal, in CI logs, and in any screenshot of the demo (P52)."""
+    # A backslash continuation is one logical recipe line, and the `@` that suppresses it can only be on
+    # the first of them -- so join first, or the second half of `invoke` reads as an unsuppressed line.
+    logical: list[str] = []
+    for line in MAKEFILE.read_text().splitlines():
+        if logical and logical[-1].endswith("\\"):
+            logical[-1] = logical[-1][:-1] + " " + line.strip()
+        else:
+            logical.append(line)
+    offenders = [
+        line.strip()
+        for line in logical
+        if line.startswith("\t") and "$(TOKEN)" in line and not line.lstrip("\t").startswith("@")
+    ]
+    assert offenders == [], f"these recipe lines would echo the bearer token: {offenders}"
