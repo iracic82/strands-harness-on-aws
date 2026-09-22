@@ -128,7 +128,9 @@ back, its status, and the tool's name. It is not mapped from a stream event, bec
 event: `ToolResultEvent` is not a callback event, so `stream_async` never yields one (P51).
 `tool_events.ToolResultRecorder` records every finished call from the SDK's `AfterToolCallEvent` hook, and
 `http_app._turn` drains that buffer between stream events — so the frame lands right after the `tool_use`
-frame for the same call, and before whatever the model said next.
+frame for the same call, and before whatever the model said next. On the cloud profile there is one
+exception: `programmatic_tool_caller` runs the calls the agent writes in code through the executor itself
+and consumes their events, so those arrive as `tool_result` frames with no preceding `tool_use` frame.
 
 **`denied{tool, reason}`, then an error `tool_result`.** A `ReadOnlyGuard` refusal produces a `tool_use`
 frame, then a `denied` frame, then a `tool_result` frame with `status=error` for the same call. The

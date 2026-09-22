@@ -556,8 +556,10 @@ fetched so the SDK does not resolve it a second time and guess differently.
 handles never appears. The mapper branch for it is dead code and nothing tells you.
 **Cause.** In `strands-agents` 1.56 `ToolResultEvent.is_callback_event` is `False`, so the agent loop
 consumes it and never hands it to a `stream_async` consumer. A real tool-calling turn yields
-`tool_use_stream`, `data`, and `result` events, and nothing else. `tool_cancel_event` *is* a callback event
-(P35's sibling, the `denied` frame), which makes the absence of the result easy to miss.
+`init_event_loop`, `start`, `start_event_loop`, raw `event` chunks, `tool_use_stream`, `message`, `data`
+and `result`, plus `tool_cancel_event` when an intervention denies a call, but never a tool result.
+`tool_cancel_event` *is* a callback event (P35's sibling, the `denied` frame), which makes the absence of
+the result easy to miss.
 **Fix.** Take tool results from the hook system instead: a `HookProvider` that subscribes to
 `AfterToolCallEvent` fires for every finished call, successful or not, with both the `ToolUse` (so you get
 the name) and the `ToolResult`. Buffer them and drain the buffer between stream events, so the frame still
@@ -566,7 +568,11 @@ lands in the order a reader expects.
 `agent.build_agent`/`build_reader` and attached to the returned agent; drained by `http_app._turn` and
 (to bound its growth on a cached agent, since A2A publishes one text artifact) by `a2a_app._text_chunks`.
 Pinned by `tests/test_tool_events.py` and
-`tests/test_http_app.py::test_invoke_emits_a_tool_result_frame_from_the_after_tool_hook`.
+`tests/test_http_app.py::test_invoke_emits_a_tool_result_frame_from_the_after_tool_hook`. One consequence
+worth knowing before you assume every result has a `tool_use` frame ahead of it: on the cloud profile
+`programmatic_tool_caller` runs its inner calls through `ToolExecutor._stream` itself and consumes those
+events, so the hook fires for calls whose `tool_use_stream` events never reached the runtime, and they
+reach the wire as `tool_result` frames with no preceding `tool_use` frame.
 
 ---
 

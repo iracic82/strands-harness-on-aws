@@ -47,6 +47,7 @@ class EventMapper:
         self._names: dict[str, str] = {}
         self._emitted: set[str | None] = set()
         self._denied: set[str] = set()
+        self._results: set[str] = set()
 
     def map(self, event: Any) -> dict | None:
         if not isinstance(event, dict):
@@ -110,10 +111,19 @@ class EventMapper:
     def _map_tool_result(self, event: dict) -> dict | None:
         """The SDK does not stream tool results, so these come from the after-tool hook
         (`tool_events.ToolResultRecorder`, P51), which supplies the name the id map would otherwise
-        have to. The id-map fallback stays for a result recorded without one."""
+        have to. The id-map fallback stays for a result recorded without one.
+
+        One frame per toolUseId, like `_map_tool_use_stream` and `_map_tool_cancel`: the recorder
+        reports each call once, but an SDK that streamed results again would otherwise double-report
+        every call the hook already recorded. Dedup is skipped when there is no id to key on.
+        """
         tr = event.get("tool_result")
         tr = tr if isinstance(tr, dict) else {}
         tool_use_id = tr.get("toolUseId", "")
+        if isinstance(tool_use_id, str) and tool_use_id:
+            if tool_use_id in self._results:
+                return None
+            self._results.add(tool_use_id)
         name = tr.get("name") or self._names.get(tool_use_id, "")
         return frame(
             "tool_result",

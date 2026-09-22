@@ -211,6 +211,24 @@ async def test_a_turn_discards_tool_results_left_behind_by_an_abandoned_turn():
     assert frames == []
 
 
+async def test_an_abandoned_turn_frees_its_buffer_without_waiting_for_the_next_one():
+    """A turn cancelled mid-tool is closed at a pull, after its last drain ran. The `finally` frees the
+    buffer there and then, rather than leaving it on the cached agent until something opens a turn."""
+
+    class StallingAgent(RecordingAgent):
+        async def stream_async(self, prompt, **kw):
+            yield {"data": "thinking"}
+            self.recorder._on_after_tool(self._finished)
+            await asyncio.Event().wait()  # the tool finished; the turn is cancelled before the next event
+
+    agent = StallingAgent([], _finished())
+    turn = http_app._turn(agent, "x", http_app.LIMITS, []).__aiter__()
+    assert await turn.__anext__() == {"v": 1, "type": "text", "delta": "thinking"}
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(turn.__anext__(), 0.05)
+    assert agent.recorder.drain() == []
+
+
 async def test_invoke_works_for_an_agent_with_no_recorder(monkeypatch):
     """`recorder_for` returns None for any agent not built by `build_agent` (P51)."""
     _use(monkeypatch, FakeAgent([{"data": "hi"}, {"result": _result()}]))

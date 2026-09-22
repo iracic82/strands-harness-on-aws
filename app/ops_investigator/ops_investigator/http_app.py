@@ -76,7 +76,7 @@ app = BedrockAgentCoreApp()
 
 def _recorded(recorder: tool_events.ToolResultRecorder | None, mapper: sse.EventMapper) -> Iterator[dict]:
     """Frames for the tool calls that finished since the last drain (P51)."""
-    for event in recorder.drain() if recorder else ():
+    for event in recorder.drain() if recorder is not None else ():
         frame = sse.map_event(event, mapper)
         if frame:
             yield frame
@@ -88,24 +88,30 @@ async def _turn(agent: Any, prompt: str, limits: dict, results: list[Any]) -> As
     mapper = sse.EventMapper()  # one per turn: dedupes tool_use frames and names tool_result frames
     recorder = tool_events.recorder_for(agent)
     if recorder is not None:
-        # A turn whose consumer walked away (client disconnect, wall clock) is closed at a `yield`, so its
-        # last drain never ran. Those results belong to that turn; drop them rather than open this one with
-        # them. The drain cannot move into a `finally`, because yielding from one turns a GeneratorExit
-        # into a RuntimeError (P36).
+        # Open on an empty buffer: this is the correctness guarantee. A turn whose consumer walked away
+        # (client disconnect, wall clock) is closed at a `yield`, and results it never got to report
+        # belong to it, not to whoever runs next on the same cached agent.
         recorder.drain()
-    async for event in agent.stream_async(prompt, limits=limits):
-        # A finished tool call reaches us through the after-tool hook, never the stream (P51). Drain
-        # before this event is mapped, so its `tool_result` frame precedes whatever the model said next.
-        for frame in _recorded(recorder, mapper):
+    try:
+        async for event in agent.stream_async(prompt, limits=limits):
+            # A finished tool call reaches us through the after-tool hook, never the stream (P51). Drain
+            # before this event is mapped, so its `tool_result` frame precedes what the model said next.
+            for frame in _recorded(recorder, mapper):
+                yield frame
+            if isinstance(event, dict) and "result" in event:
+                results.append(event["result"])
+                continue
+            frame = sse.map_event(event, mapper)
+            if frame:
+                yield frame
+        for frame in _recorded(recorder, mapper):  # a call that finished after the stream's last event
             yield frame
-        if isinstance(event, dict) and "result" in event:
-            results.append(event["result"])
-            continue
-        frame = sse.map_event(event, mapper)
-        if frame:
-            yield frame
-    for frame in _recorded(recorder, mapper):  # a call that finished after the stream's last event
-        yield frame
+    finally:
+        if recorder is not None:
+            # Free an abandoned turn's buffer now rather than at the next turn. This `finally` must not
+            # yield: doing so during a GeneratorExit raises RuntimeError (P36), which is why the drain
+            # above it is the one that reports, and this one only discards.
+            recorder.drain()
 
 
 async def _stream(agent: Any, prompt: str, limits: dict, model: str) -> AsyncIterator[dict]:

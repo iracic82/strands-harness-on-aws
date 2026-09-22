@@ -3,8 +3,11 @@
 `agent.stream_async()` never yields a tool result: in `strands-agents` 1.56 `ToolResultEvent`
 is not a callback event, so the only place a completed call surfaces is the `AfterToolCallEvent`
 hook (P51). `ToolResultRecorder` buffers each completed call in the shape `sse.EventMapper`
-already maps, and the runtime's stream loop drains it between events so the `tool_result` frame
-lands right after the `tool_use` frame for the same call.
+already maps, and the runtime's stream loop drains it between events, so a `tool_result` frame
+normally lands right after the `tool_use` frame for the same call. Not always: on the cloud
+profile `programmatic_tool_caller` runs its inner calls through `ToolExecutor._stream` itself and
+consumes those events, so the hook fires for a call whose `tool_use_stream` events never reached
+the runtime. Those results are reported with no `tool_use` frame ahead of them.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ class ToolResultRecorder(HookProvider):
         registry.add_callback(AfterToolCallEvent, self._on_after_tool)
 
     def _on_after_tool(self, event: AfterToolCallEvent, **kwargs: Any) -> None:
-        """Never raises: a hook that throws would take the tool loop down with it."""
+        """Cannot raise on an odd payload shape: a hook that throws takes the tool loop down with it."""
         tool_use = event.tool_use if isinstance(event.tool_use, dict) else {}
         result = event.result if isinstance(event.result, dict) else {}
         self._pending.append(

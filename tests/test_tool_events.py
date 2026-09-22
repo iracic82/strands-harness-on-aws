@@ -92,6 +92,16 @@ def test_only_the_name_status_and_a_byte_count_reach_the_wire():
     assert secret not in str(frame)
 
 
+def test_a_call_the_mapper_never_saw_is_still_named():
+    """`programmatic_tool_caller` runs its inner calls through `ToolExecutor._stream` itself and consumes
+    those events, so the hook fires for a toolUseId no `tool_use_stream` event ever announced. The name
+    has to come from the recorder, because the mapper's id map has never heard of this call."""
+    recorder = ToolResultRecorder()
+    _fire(recorder, _event(tool_use={"toolUseId": "tooluse_aws_call_123456789", "name": "aws_call"}))
+    frame = sse.map_event(recorder.drain()[0], sse.EventMapper())
+    assert frame["type"] == "tool_result" and frame["name"] == "aws_call"
+
+
 def test_attach_and_recorder_for_round_trip():
     class FakeAgent:
         pass

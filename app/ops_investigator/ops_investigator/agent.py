@@ -108,6 +108,9 @@ def build_agent(session_id: str, actor_id: str, env: Mapping[str, str] | None = 
         memory=platform.memory_option(rt),
         skills=platform.skills_option(rt),
         interventions=[platform.guard_for(rt)],
+        # The harness forwards consumer hooks to subagents it builds itself, which is inert here: the
+        # builtin `subagent` tool is off in both profiles, and the one delegate is `make_reader_tool`,
+        # whose builder is `build_reader` above and which therefore gets its own recorder, not this one.
         hooks=[recorder],
         caching="auto",
         context_manager="auto",

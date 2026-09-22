@@ -80,6 +80,17 @@ def test_map_event_handles_content_not_a_list():
     assert out3 == {"v": 1, "type": "tool_result", "name": "", "status": "", "bytes": 0}
 
 
+def test_one_tool_result_frame_per_tool_use_id():
+    """Guards a future SDK that streams tool results again, on top of the hook that records them (P51)."""
+    mapper = sse.EventMapper()
+    ev = {"type": "tool_result", "tool_result": {"toolUseId": "t1", "name": "aws_call", "status": "success"}}
+    assert sse.map_event(ev, mapper)["name"] == "aws_call"
+    assert sse.map_event(ev, mapper) is None
+    # Nothing to key a repeat on -> no dedup, same as `_map_tool_use_stream` and `_map_tool_cancel`.
+    anon = {"type": "tool_result", "tool_result": {"name": "aws_call", "status": "success"}}
+    assert sse.map_event(anon, mapper) and sse.map_event(anon, mapper)
+
+
 def test_metrics_frame_handles_none_accumulated_usage():
     result = SimpleNamespace(stop_reason="end_turn", metrics=SimpleNamespace(cycle_count=0, accumulated_usage=None))
     out = sse.metrics_frame(result, model="bedrock/global.anthropic.claude-sonnet-5")
