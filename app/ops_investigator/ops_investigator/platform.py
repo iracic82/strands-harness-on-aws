@@ -12,7 +12,12 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from strands.session.session_manager import SessionManager
+
+    from ops_investigator.guard import ReadOnlyGuard
 
 MEMORY_ENV = "MEMORY_OPSINVESTIGATORMEMORY_ID"
 DEFAULT_MODEL = "bedrock/global.anthropic.claude-sonnet-5"
@@ -84,3 +89,66 @@ def enter_workspace(rt: Runtime) -> Path:
         shutil.copyfile(src, rt.workspace / "AGENTS.md")
     os.chdir(rt.workspace)
     return rt.workspace
+
+
+def builtin_tools(rt: Runtime) -> dict[str, Any]:
+    """P21: a mapping *edits* the harness defaults; only `{"*": False, ...}` pins the set."""
+    if rt.profile == "cloud":
+        return {
+            "*": False,
+            "read": True,
+            "programmatic_tool_caller": {
+                "allowed_tools": ["aws_call", "logs_insights", "cost_explorer"],
+                "timeout": 60,
+            },
+        }
+    return {"subagent": False, "web_search": False}  # local keeps shell/file/web_fetch for exploration
+
+
+def guard_for(rt: Runtime) -> ReadOnlyGuard:
+    """Cloud denies the dangerous builtins outright; local keeps them (the guard still vets aws_call and shell)."""
+    from ops_investigator.guard import ReadOnlyGuard
+
+    return ReadOnlyGuard() if rt.profile == "cloud" else ReadOnlyGuard(denied_tools=frozenset())
+
+
+def skills_option(rt: Runtime) -> str:
+    return str(rt.app_dir / "skills")
+
+
+def session_option(rt: Runtime) -> SessionManager | dict[str, str]:
+    if rt.profile == "local":
+        return {"id": rt.session_id, "dir": str(rt.app_dir / ".agent" / "sessions")}
+    from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
+    from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+
+    return AgentCoreMemorySessionManager(
+        AgentCoreMemoryConfig(
+            memory_id=rt.memory_id,
+            session_id=rt.session_id,
+            actor_id=rt.actor_id,
+            retrieval_config=None,  # single reader: the harness stores (P3)
+            async_mode=True,  # never block the SSE stream (P14)
+            filter_restored_tool_context=True,  # dead offload references after a microVM restart (P23)
+        ),
+        rt.region,
+    )
+
+
+def memory_option(rt: Runtime) -> dict[str, Any]:
+    if rt.profile == "local":
+        return {"dir": str(rt.app_dir / ".agent" / "memory")}
+    from bedrock_agentcore.memory.integrations.strands.memorystore.factory import create_agentcore_memory_stores
+
+    stores = create_agentcore_memory_stores(
+        memory_id=rt.memory_id,
+        actor_id=rt.actor_id,
+        session_id=rt.session_id,
+        namespaces=[
+            {"namespace": f"/preferences/{rt.actor_id}/", "name": "preferences", "max_search_results": 5},
+            {"namespace": f"/facts/{rt.actor_id}/", "name": "facts", "max_search_results": 5},
+        ],
+        extraction=False,  # AgentCore strategies are the single writer (P3)
+        region_name=rt.region,
+    )
+    return {"stores": stores}
