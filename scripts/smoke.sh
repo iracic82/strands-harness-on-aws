@@ -12,6 +12,9 @@ cd "$(dirname "$0")/.."
 
 : "${REGION:=us-west-2}"
 : "${DEMO_PASSWORD:?set DEMO_PASSWORD to the password of the demo user}"
+# Both, for every child process: botocore reads only AWS_DEFAULT_REGION, so a client built without an
+# explicit region_name would use the region from ~/.aws/config rather than the one being smoked.
+export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 AGENTCORE="npx -y @aws/agentcore@0.30.0"
 
 # doctor exits 1 on any WARN and 2 on any FAIL; only a FAIL is worth stopping a paid smoke for.

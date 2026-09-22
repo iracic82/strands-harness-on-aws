@@ -1,8 +1,13 @@
-REGION ?= us-west-2
+# An exported AWS_REGION is honoured, so `make dev` never silently moves you to another region.
+REGION ?= $(or $(AWS_REGION),us-west-2)
 PROJECT ?= harnessaws
 RUNTIME ?= OpsInvestigator
 PROMPT ?= Which AWS account and region are you looking at? Use aws_call sts get_caller_identity.
 TRANSPORT ?= https
+# Both variables, always: botocore resolves the region from AWS_DEFAULT_REGION and the profile config
+# only. A boto3 client built without an explicit region_name (the harness's own Bedrock client) does
+# not see AWS_REGION at all, and would quietly use whatever region ~/.aws/config gives the profile.
+REGION_ENV = AWS_REGION=$(REGION) AWS_DEFAULT_REGION=$(REGION)
 # Always npx, always from the repo root: a deprecated Python `agentcore` binary shadows the npm CLI on
 # some machines, and the CLI finds the project by walking into ./agentcore on its own.
 AGENTCORE = npx -y @aws/agentcore@0.30.0
@@ -28,12 +33,12 @@ token:
 # `$(AGENTCORE) dev --runtime $(RUNTIME)` is the alternative: it builds and runs the real container, but
 # needs the CLI's project context and a deployed memory to attach to.
 dev:
-	uv run python app/ops_investigator/main.py
+	$(REGION_ENV) uv run python app/ops_investigator/main.py
 
 # make invoke PROMPT="..."                      -> the local dev server
 # make invoke ARN=... TOKEN=... PROMPT="..."    -> the deployed runtime over HTTPS with a Cognito bearer
 invoke:
-	uv run python scripts/invoke.py --region $(REGION) --prompt "$(PROMPT)" \
+	$(REGION_ENV) uv run python scripts/invoke.py --region $(REGION) --prompt "$(PROMPT)" \
 		$(if $(ARN),--arn "$(ARN)" --transport $(TRANSPORT),--dev) $(if $(TOKEN),--token "$(TOKEN)",)
 
 test:
@@ -62,7 +67,7 @@ memory-wipe:
 	uv run python scripts/memory_wipe.py --region $(REGION) --memory-id "$(MEMORY_ID)" --actor "$(ACTOR)"
 
 smoke:
-	bash scripts/smoke.sh
+	$(REGION_ENV) REGION=$(REGION) bash scripts/smoke.sh
 
 destroy:
 	$(AGENTCORE) remove all -y && $(AGENTCORE) deploy -y

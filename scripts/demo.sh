@@ -15,6 +15,8 @@ cd "$(dirname "$0")/.."
 : "${CLIENT_ID:?set CLIENT_ID to the Cognito app client id (auth_bootstrap.py prints it)}"
 : "${MEMORY_ID:?set MEMORY_ID to the OpsInvestigatorMemory id (agentcore status --json)}"
 : "${DEMO_PASSWORD:?set DEMO_PASSWORD to the password of the demo user}"
+# botocore reads only AWS_DEFAULT_REGION; export both so every child lands in the region being demoed.
+export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 
 STDERR=$(mktemp)
 trap 'rm -f "$STDERR"' EXIT

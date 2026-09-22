@@ -53,7 +53,9 @@ def detect(session_id: str, actor_id: str, env: Mapping[str, str] | None = None)
     if profile == "cloud" and not region:
         raise RuntimeConfigError(
             "AWS_REGION is not set inside the runtime. Fix: add {name: AWS_REGION, value: <region>} to the runtime's "
-            "envVars in agentcore/agentcore.json (P5)."
+            "envVars in agentcore/agentcore.json (P5). Set AWS_DEFAULT_REGION to the same value there as well: "
+            "botocore reads only AWS_DEFAULT_REGION, so a boto3 client built without an explicit region_name "
+            "(the harness's own Bedrock client) does not see AWS_REGION at all."
         )
     effort = env.get("HARNESS_EFFORT", DEFAULT_EFFORT)
     if effort not in EFFORTS:

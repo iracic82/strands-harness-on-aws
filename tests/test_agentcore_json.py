@@ -81,6 +81,10 @@ def test_runtimes_declare_the_model_and_budget_the_harness_reads():
         # platform.detect raises RuntimeConfigError in the cloud profile without a region, so every
         # runtime has to carry one. setup.py rewrites it per deployment target.
         assert env["AWS_REGION"] == "us-west-2", runtime["name"]
+        # And AWS_DEFAULT_REGION beside it: botocore resolves the region from AWS_DEFAULT_REGION only,
+        # so a client built without an explicit region_name (the harness's own Bedrock client) would
+        # otherwise have no region at all inside the container.
+        assert env["AWS_DEFAULT_REGION"] == env["AWS_REGION"], runtime["name"]
         assert env["HARNESS_MODEL"] == "bedrock/global.anthropic.claude-sonnet-4-6", runtime["name"]
         assert env["HARNESS_EFFORT"] == "medium", runtime["name"]
         assert env["HARNESS_MAX_SECONDS"] == "600", runtime["name"]
