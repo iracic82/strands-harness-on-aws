@@ -3457,3 +3457,153 @@ def test_readme_has_no_untagged_cloud_commands():
 - [ ] **Step 3: Wire `uv run python scripts/verify_docs.py` into `make lint` and the CI `test` job.**
 
 - [ ] **Step 4: During Task 15**, capture the three screenshots with the Chrome tools, save under `docs/img/`, and paste the `demo.sh` transcript into `docs/img/demo-terminal.txt`. Commit → `git add -A && git commit -m "docs: verified commands, Mermaid diagrams, and smoke screenshots"`.
+
+---
+
+### Task 17: First-class public repo gate (no secrets, clone-and-go)
+
+**Files:**
+- Create: `scripts/setup.py`, `.env.example`, `.gitleaks.toml`, `.pre-commit-config.yaml`, `tests/test_repo_hygiene.py`, `agentcore/aws-targets.example.json`
+- Modify: `.gitignore`, `Makefile` (`setup` target, `hygiene` target), `.github/workflows/ci.yml` (gitleaks job + fresh-clone job), `README.md` (Quickstart starts with `make setup`)
+
+**Rules (binding for every task from here on):**
+- Nothing account-specific is committed: no 12-digit AWS account ids, no ARNs containing an account id, no Cognito pool/client ids, no runtime ARNs, no `/Users/<name>` paths, no profile names other than the placeholder `<your-profile>`. The owner's account `123456789012` and profile `my-profile` never appear in tracked files (docs/superpowers/ is the one exception and is excluded from the published repo via `.gitattributes export-ignore` **and** listed in the hygiene test's allowlist).
+- `agentcore/aws-targets.json`, `agentcore/.cli/`, `agentcore/.env.local`, `.env`, `.agent/` are git-ignored. `agentcore/aws-targets.example.json` is committed with `"account": "123456789012"`.
+- `make setup` generates what the user's environment needs: detects region (`AWS_REGION` or the profile's default), calls STS for the account id, writes `agentcore/aws-targets.json` from the example, writes `.env` from `.env.example` with the detected values, and prints the next command. Idempotent; never overwrites a file that already differs unless `--force`.
+- Placeholders in `agentcore.json` are the literal strings `REPLACED_BY_auth_bootstrap` / `REPLACED_AFTER_FIRST_DEPLOY`; `auth_bootstrap.py` and `smoke.sh` rewrite them locally and the resulting file is **not** meant to be committed back (documented; `make hygiene` fails if a real discovery URL or client id is staged).
+
+- [ ] **Step 1: Failing hygiene tests** (`tests/test_repo_hygiene.py`)
+
+```python
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+ALLOW = ("docs/superpowers/",)                       # design history; export-ignored from the published archive
+ACCOUNT_ID = re.compile(r"(?<!\d)\d{12}(?!\d)")
+ARN_WITH_ACCOUNT = re.compile(r"arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:")
+USER_PATH = re.compile(r"/Users/[A-Za-z0-9_.-]+/")
+COGNITO_ID = re.compile(r"\b[a-z]{2}-[a-z]+-\d_[A-Za-z0-9]{9}\b")
+
+
+def _tracked() -> list[Path]:
+    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    return [ROOT / p for p in out.splitlines() if p and not p.startswith(ALLOW) and not p.endswith(("uv.lock", ".png", ".lock"))]
+
+
+def test_no_account_specific_values_committed():
+    bad = []
+    for path in _tracked():
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for rx in (ARN_WITH_ACCOUNT, USER_PATH, COGNITO_ID):
+            for m in rx.finditer(text):
+                if "123456789012" in m.group(0) or "<your" in m.group(0):
+                    continue
+                bad.append(f"{path.relative_to(ROOT)}: {m.group(0)}")
+        for m in ACCOUNT_ID.finditer(text):
+            if m.group(0) != "123456789012":
+                bad.append(f"{path.relative_to(ROOT)}: account id {m.group(0)}")
+    assert bad == [], "\n".join(bad)
+
+
+def test_generated_files_are_ignored():
+    for rel in ("agentcore/aws-targets.json", "agentcore/.cli/deployed-state.json", "agentcore/.env.local", ".env", ".agent/x"):
+        r = subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT)
+        assert r.returncode == 0, f"{rel} must be git-ignored"
+
+
+def test_agentcore_json_has_only_placeholders():
+    text = (ROOT / "agentcore" / "agentcore.json").read_text()
+    assert "REPLACED_BY_auth_bootstrap" in text
+    assert "cognito-idp." not in text, "a real Cognito discovery URL is committed; run scripts/setup.py --reset-placeholders"
+```
+
+- [ ] **Step 2: `scripts/setup.py`**
+
+```python
+#!/usr/bin/env python3
+"""One-time local setup: detect account/region, write agentcore/aws-targets.json and .env. Idempotent."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import boto3
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def detect_region(explicit: str | None) -> str:
+    return explicit or os.environ.get("AWS_REGION") or boto3.session.Session().region_name or "us-west-2"
+
+
+def write_if_absent(path: Path, content: str, force: bool) -> str:
+    if path.exists() and not force:
+        return "kept" if path.read_text() == content else "exists (differs; use --force to overwrite)"
+    path.write_text(content)
+    return "written"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--region", default=None)
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--reset-placeholders", action="store_true", help="restore REPLACED_BY_* placeholders in agentcore.json")
+    a = ap.parse_args()
+    region = detect_region(a.region)
+    ident = boto3.client("sts", region_name=region).get_caller_identity()
+    account = ident["Account"]
+    targets = json.loads((ROOT / "agentcore" / "aws-targets.example.json").read_text())
+    for t in targets:
+        t["account"], t["region"] = account, region
+    print("aws-targets.json:", write_if_absent(ROOT / "agentcore" / "aws-targets.json", json.dumps(targets, indent=2) + "\n", a.force))
+    env = (ROOT / ".env.example").read_text().replace("<region>", region).replace("<account-id>", account)
+    print(".env:", write_if_absent(ROOT / ".env", env, a.force))
+    if a.reset_placeholders:
+        p = ROOT / "agentcore" / "agentcore.json"
+        text = p.read_text()
+        text = re.sub(r'"discoveryUrl": "[^"]*"', '"discoveryUrl": "REPLACED_BY_auth_bootstrap"', text)
+        text = re.sub(r'"allowedClients": \[[^\]]*\]', '"allowedClients": ["REPLACED_BY_auth_bootstrap"]', text)
+        text = re.sub(r'\{"name": "COGNITO_DISCOVERY_URL", "value": "[^"]*"\}', '{"name": "COGNITO_DISCOVERY_URL", "value": "REPLACED_BY_auth_bootstrap"}', text)
+        text = re.sub(r'\{"name": "A2A_PUBLIC_URL", "value": "[^"]*"\}', '{"name": "A2A_PUBLIC_URL", "value": "REPLACED_AFTER_FIRST_DEPLOY"}', text)
+        p.write_text(text)
+        print("agentcore.json: placeholders restored")
+    print(f"\naccount={account} region={region} caller={ident['Arn'].rsplit('/', 1)[-1]}\nnext: make doctor")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+`agentcore/aws-targets.example.json` is the CLI-generated `aws-targets.json` with account replaced by `123456789012` and region `us-west-2`. `.env.example`:
+
+```
+# Copied to .env by `make setup`; .env is git-ignored. Only non-secret settings live here.
+AWS_REGION=<region>
+AWS_ACCOUNT_ID=<account-id>
+HARNESS_MODEL=bedrock/global.anthropic.claude-sonnet-5
+HARNESS_EFFORT=medium
+# DEMO_PASSWORD is read from the environment, never from a file. Export it in your shell before `make auth-bootstrap`.
+```
+
+- [ ] **Step 3: Secrets scanning**: `.gitleaks.toml` (default rules + allowlist for `docs/superpowers/` and `123456789012`), `.pre-commit-config.yaml` with `gitleaks` and `ruff` hooks, CI job `secrets` running `gitleaks/gitleaks-action@v2`, and a `fresh-clone` CI job: `git clone --depth 1 "$GITHUB_WORKSPACE" /tmp/fresh && cd /tmp/fresh && uv sync --frozen && uv run pytest -q && uv run python doctor.py --help`. Add `.gitattributes` with `docs/superpowers/ export-ignore`.
+
+- [ ] **Step 4: Makefile** → `setup: uv run python scripts/setup.py --region $(REGION)`; `hygiene: uv run pytest tests/test_repo_hygiene.py -q && (command -v gitleaks >/dev/null && gitleaks detect --no-banner || echo "gitleaks not installed; CI runs it")`. Add `hygiene` to `lint`.
+
+- [ ] **Step 5: README Quickstart becomes**: `git clone ... && cd ... && uv sync && export AWS_PROFILE=<your-profile> && make setup && make doctor && make dev`.
+
+- [ ] **Step 6: Run `make hygiene` and fix every hit; commit** → `git add -A && git commit -m "chore: public-repo hygiene gate, setup script, secrets scanning"`.
+
+Note for Tasks 11, 12, 15: never commit `agentcore/aws-targets.json`, `agentcore/.cli/`, or an `agentcore.json` with real Cognito values; run `scripts/setup.py --reset-placeholders` before committing after a smoke run.
