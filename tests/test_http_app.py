@@ -203,6 +203,14 @@ async def test_invoke_emits_a_tool_result_recorded_after_the_last_stream_event(m
     assert frames[0]["status"] == "error" and frames[0]["name"] == "aws_call"
 
 
+async def test_a_turn_discards_tool_results_left_behind_by_an_abandoned_turn():
+    """A disconnect closes the stream at a `yield`, before its last drain: those results are that turn's."""
+    agent = RecordingAgent([{"result": _result()}], _finished())
+    agent.recorder._on_after_tool(_finished())  # left over from the turn that was abandoned
+    frames = [frame async for frame in http_app._turn(agent, "x", http_app.LIMITS, [])]
+    assert frames == []
+
+
 async def test_invoke_works_for_an_agent_with_no_recorder(monkeypatch):
     """`recorder_for` returns None for any agent not built by `build_agent` (P51)."""
     _use(monkeypatch, FakeAgent([{"data": "hi"}, {"result": _result()}]))

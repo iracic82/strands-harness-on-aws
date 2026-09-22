@@ -87,6 +87,12 @@ async def _turn(agent: Any, prompt: str, limits: dict, results: list[Any]) -> As
     (which arrives as the last stream event, not as a frame) lands in `results`."""
     mapper = sse.EventMapper()  # one per turn: dedupes tool_use frames and names tool_result frames
     recorder = tool_events.recorder_for(agent)
+    if recorder is not None:
+        # A turn whose consumer walked away (client disconnect, wall clock) is closed at a `yield`, so its
+        # last drain never ran. Those results belong to that turn; drop them rather than open this one with
+        # them. The drain cannot move into a `finally`, because yielding from one turns a GeneratorExit
+        # into a RuntimeError (P36).
+        recorder.drain()
     async for event in agent.stream_async(prompt, limits=limits):
         # A finished tool call reaches us through the after-tool hook, never the stream (P51). Drain
         # before this event is mapped, so its `tool_result` frame precedes whatever the model said next.
