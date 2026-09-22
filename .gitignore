@@ -11,3 +11,8 @@ cdk.out/
 app/**/.venv/
 agentcore/cdk/cdk.out/
 agentcore/cdk/node_modules/
+
+# AgentCore CLI local state: these carry the AWS account id / deployed ARNs.
+agentcore/aws-targets.json
+agentcore/.cli/
+agentcore/.env.local

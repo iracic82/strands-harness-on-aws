@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Secrets and environment files
+.env
+.env.*
+
+# Version control
+.git/
+
+# AgentCore build artifacts
+.agentcore/artifacts/
+*.zip
+
+# IAM policy documents. CDK reads these from the local disk at synth time (relative to
+# codeLocation) and attaches them as inline policies on the execution role, so they must
+# exist in the repo but must never ship inside the image.
+policies/
+
+# Local harness session state written by `agentcore dev` / local runs.
+.agent/

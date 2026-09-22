@@ -1,0 +1,8 @@
+[
+  {
+    "name": "default",
+    "description": "Copy to aws-targets.json and replace account with your own. aws-targets.json is git-ignored.",
+    "account": "123456789012",
+    "region": "us-west-2"
+  }
+]

@@ -1,0 +1,21 @@
+# Secrets (local environment files are never committed)
+.env.local
+
+# CDK Build Artifacts
+cdk/cdk.out/
+cdk/node_modules/
+
+# CLI Internals
+.cli/*
+
+# Ephemeral Staging
+.cache/*
+
+# Deployment targets carry the AWS account id, so this repo ships only the example.
+# Copy aws-targets.example.json to aws-targets.json and fill in your own account.
+aws-targets.json
+
+# NOTE: the CLI template ends with `!.cli/deployed-state.json` to commit the deployed state.
+# This repo drops that exception on purpose: deployed-state.json records deployed ARNs, which
+# embed the AWS account id, and nothing account-specific is committed here. Regenerate it with
+# `npx -y @aws/agentcore@0.30.0 status` / `fetch` after a deploy.

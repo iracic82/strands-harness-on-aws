@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "harnessaws",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "harnessaws",
+    "project": "strands-harness-on-aws"
+  },
+  "runtimes": [
+    {
+      "name": "OpsInvestigator",
+      "description": "Strands harness AWS Ops Investigator (HTTP/SSE)",
+      "build": "Container",
+      "entrypoint": "main.py",
+      "codeLocation": "app/ops_investigator/",
+      "dockerfile": "Dockerfile",
+      "runtimeVersion": "PYTHON_3_12",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "envVars": [
+        { "name": "HARNESS_MODEL", "value": "bedrock/global.anthropic.claude-sonnet-4-6" },
+        { "name": "HARNESS_EFFORT", "value": "medium" },
+        { "name": "HARNESS_MAX_SECONDS", "value": "600" },
+        { "name": "OPS_LOG_GROUP_PREFIXES", "value": "/aws/lambda/,/aws/ecs/,/aws/apigateway/,/aws/eks/" }
+      ],
+      "additionalPolicies": ["arn:aws:iam::aws:policy/ReadOnlyAccess", "policies/execution-role-deny.json"],
+      "requestHeaderAllowlist": ["Authorization"],
+      "authorizerType": "CUSTOM_JWT",
+      "authorizerConfiguration": {
+        "customJwtAuthorizer": {
+          "discoveryUrl": "https://cognito-idp.us-west-2.amazonaws.com/REPLACED_BY_auth_bootstrap/.well-known/openid-configuration",
+          "allowedClients": ["REPLACED_BY_auth_bootstrap"]
+        }
+      }
+    },
+    {
+      "name": "OpsInvestigatorA2A",
+      "description": "Same agent over A2A 1.0 (agent card at /.well-known/agent-card.json)",
+      "build": "Container",
+      "entrypoint": "a2a_main.py",
+      "codeLocation": "app/ops_investigator/",
+      "dockerfile": "Dockerfile.a2a",
+      "runtimeVersion": "PYTHON_3_12",
+      "networkMode": "PUBLIC",
+      "protocol": "A2A",
+      "envVars": [
+        { "name": "HARNESS_MODEL", "value": "bedrock/global.anthropic.claude-sonnet-4-6" },
+        { "name": "HARNESS_EFFORT", "value": "medium" },
+        { "name": "HARNESS_MAX_SECONDS", "value": "600" },
+        { "name": "A2A_PUBLIC_URL", "value": "REPLACED_AFTER_FIRST_DEPLOY" },
+        { "name": "COGNITO_DISCOVERY_URL", "value": "REPLACED_BY_auth_bootstrap" }
+      ],
+      "additionalPolicies": ["arn:aws:iam::aws:policy/ReadOnlyAccess", "policies/execution-role-deny.json"],
+      "requestHeaderAllowlist": ["Authorization"],
+      "authorizerType": "CUSTOM_JWT",
+      "authorizerConfiguration": {
+        "customJwtAuthorizer": {
+          "discoveryUrl": "https://cognito-idp.us-west-2.amazonaws.com/REPLACED_BY_auth_bootstrap/.well-known/openid-configuration",
+          "allowedClients": ["REPLACED_BY_auth_bootstrap"]
+        }
+      }
+    }
+  ],
+  "memories": [
+    {
+      "name": "OpsInvestigatorMemory",
+      "eventExpiryDuration": 30,
+      "strategies": [
+        { "type": "USER_PREFERENCE", "namespaceTemplates": ["/preferences/{actorId}/"] },
+        { "type": "SEMANTIC", "namespaceTemplates": ["/facts/{actorId}/"] }
+      ]
+    }
+  ],
+  "knowledgeBases": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "harnesses": [],
+  "datasets": [],
+  "capacityProviders": [],
+  "payments": []
+}

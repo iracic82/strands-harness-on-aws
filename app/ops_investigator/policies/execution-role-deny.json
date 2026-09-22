@@ -1,0 +1,64 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "NoSecretMaterial",
+      "Effect": "Deny",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath",
+        "ssm:GetParameterHistory",
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+        "s3:GetObject*",
+        "s3:SelectObjectContent",
+        "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:Scan",
+        "dynamodb:Query",
+        "dynamodb:PartiQLSelect",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:GetLayerVersion",
+        "ec2:GetPasswordData",
+        "ec2:GetConsoleOutput",
+        "ec2:GetConsoleScreenshot",
+        "ec2:DescribeInstanceAttribute",
+        "cloudformation:GetTemplate",
+        "ecs:DescribeTaskDefinition",
+        "codebuild:BatchGetProjects",
+        "cognito-idp:AdminGetUser",
+        "cognito-idp:ListUsers",
+        "sqs:ReceiveMessage",
+        "kinesis:GetRecords",
+        "kinesis:GetShardIterator",
+        "sts:AssumeRole",
+        "sts:GetFederationToken",
+        "sts:GetSessionToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoApiKeys",
+      "Effect": "Deny",
+      "Action": "apigateway:GET",
+      "Resource": "arn:aws:apigateway:*::/apikeys*"
+    },
+    {
+      "Sid": "NoReadingOwnTranscripts",
+      "Effect": "Deny",
+      "Action": [
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "logs:StartQuery",
+        "logs:GetQueryResults"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
+        "arn:aws:logs:*:*:log-group:aws/spans*"
+      ]
+    }
+  ]
+}
