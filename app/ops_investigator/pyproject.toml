@@ -12,7 +12,7 @@ dependencies = [
   "strands-agents[otel]==1.56.0",
   "bedrock-agentcore==1.23.1",
   "a2a-sdk[http-server]>=1.1,<2",
-  "aws-opentelemetry-distro~=0.18.0",
+  "aws-opentelemetry-distro>=0.18,<0.21",
   "boto3>=1.43",
   "jmespath>=1.0",
 ]
