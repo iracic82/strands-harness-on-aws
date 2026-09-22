@@ -180,7 +180,10 @@ for page in pages.paginate(
         if any("OpsInvestigator" in (s.get("Name") or "") for s in trace.get("ServiceIds") or []):
             ours += 1
 print(f"X-Ray traces naming an OpsInvestigator runtime (last 30 min): {ours}")
-if not spans and ours:
+# `spans` is 0 when the query ran and found nothing, and None when it could not run at all. Only the
+# first of those means "indexed nothing yet"; `not spans` conflated them and printed a conclusion about a
+# query that had failed.
+if (spans == 0 or query is None) and ours:
     print(
         "Tracing works; Transaction Search has not indexed into aws/spans. Enabling it is per region and "
         "delivery can lag by tens of minutes -- and in a region where it was only just enabled it may not "
@@ -188,6 +191,17 @@ if not spans and ours:
         "GenAI Observability is the richer view once Transaction Search delivers."
     )
 PY
+
+# The runtime log groups carry the whole conversation -- system prompt, user prompt, reasoning, tool
+# arguments and answers, as `gen_ai.*.message` span events -- and AgentCore creates them with retention
+# "never expire" (P61). Print the command, do not run it: how long an account keeps its own logs is the
+# operator's decision, not this script's.
+echo "== the runtime log groups keep the full conversation, with no expiry (PITFALLS P61)."
+echo "   To cap that, run (14 days is a suggestion, not a recommendation):"
+for RUNTIME_ARN in "$ARN" "$A2A_ARN"; do
+  echo "   aws logs put-retention-policy --region $REGION \\"
+  echo "     --log-group-name /aws/bedrock-agentcore/runtimes/${RUNTIME_ARN##*/}-DEFAULT --retention-in-days 14"
+done
 
 echo "== done. Teardown with: make destroy   (left up for the demo by default)"
 # This run wrote a real discovery URL, a real client id and a real A2A_PUBLIC_URL (which carries the
