@@ -45,8 +45,7 @@ Initial release.
   gitleaks runs beside it over both history and the working tree, in CI and as a pre-commit hook, and a
   `fresh-clone` CI job proves the clone runs with nothing but the repo. The only allowlist is gitleaks',
   it is paths-only, and every entry in it is git-ignored build output -- a test asserts that with
-  `git check-ignore`. No published path is allowlisted: the design history under `docs/superpowers/` is
-  scanned with everything else, using the same placeholders.
+  `git check-ignore`. No published path is allowlisted.
 - **Two arm64 images** built by the generated CDK stack on a native ARM CodeBuild host, from a
   digest-pinned base.
 - **CI** on Python 3.12 and 3.14: ruff, pytest, gitleaks, an arm64 buildx build of both images, and a

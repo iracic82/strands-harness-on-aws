@@ -7,9 +7,7 @@ local state looks like -- account ids, runtime ARNs, Cognito pool ids, the owner
 the placeholders `auth_bootstrap` rewrites.
 
 Every file git would publish is scanned, tracked or not: `git ls-files --cached --others
---exclude-standard`. There is no allowlisted directory. `docs/superpowers/` is design history and is
-published with the rest of the repo, so it was scrubbed to the same placeholders everything else uses --
-a clone gets it, and `export-ignore` would only have hidden it from `git archive`.
+--exclude-standard`. There is no allowlisted directory.
 
 Two scans, because scrubbing the tip is not scrubbing the repository. `git push` publishes every reachable
 commit, and gitleaks does not help here -- it knows what a credential looks like and an account id or a

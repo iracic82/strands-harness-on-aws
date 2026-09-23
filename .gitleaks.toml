@@ -8,8 +8,7 @@
 # tests/test_repo_hygiene.py asserts every path in it is git-ignored, so it cannot grow to cover
 # something a clone gets.
 #
-# Nothing else is allowlisted. Every path this repo publishes, including the design history under
-# docs/superpowers/, is scanned under the same rules. An allowlist is a place for a real finding to
+# Nothing else is allowlisted. Every path this repo publishes is scanned under the same rules. An allowlist is a place for a real finding to
 # hide, and the one that was tempting -- silencing the placeholder account 123456789012 -- would have
 # silenced any finding that merely contained that digit run.
 #
