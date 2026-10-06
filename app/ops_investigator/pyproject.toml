@@ -9,7 +9,7 @@ description = "AWS Ops Investigator built on the Strands harness for AgentCore R
 requires-python = ">=3.10"
 dependencies = [
   "strands-harness==0.1.1",
-  "strands-agents[otel]==1.56.0",
+  "strands-agents[otel]==1.57.2",
   "bedrock-agentcore==1.23.1",
   "a2a-sdk[http-server]>=1.1,<2",
   "aws-opentelemetry-distro~=0.18.0",
