@@ -27,7 +27,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       # mermaid-cli is a node package, and it parses a diagram by rendering it in a headless Chromium
       # that puppeteer downloads on first use. Both caches are keyed on the file that pins the version.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - uses: actions/cache@v4
